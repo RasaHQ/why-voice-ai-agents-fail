@@ -90,7 +90,7 @@ Nebius Token Factory is an OpenAI-compatible inference platform that hosts open-
 - The `-fast` model variants give us sub-second inference, which is what voice latency requires
 - Free credits cover the entire script series many times over
 
-The default model is `meta-llama/Meta-Llama-3.1-8B-Instruct-fast`, which is plenty for the small classifier work the scripts do. To try something heavier (e.g. for the agent loop in scripts 3 and 4), set `NEBIUS_MODEL` in your `.env`:
+The default model is `meta-llama/Meta-Llama-3.1-8B-Instruct`, which is plenty for the small classifier work the scripts do. To try something heavier (e.g. for the agent loop in scripts 3 and 4), set `NEBIUS_MODEL` in your `.env`:
 
 ```bash
 # Try a richer model with native tool-calling

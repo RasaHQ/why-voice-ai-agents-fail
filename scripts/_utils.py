@@ -55,7 +55,7 @@ NEBIUS_BASE_URL: Final[str] = os.environ.get(
 # enough for the classifier and short-reply work the four scripts do.
 # Override via NEBIUS_MODEL if you want to try Qwen3, MiniMax, DeepSeek, etc.
 DEFAULT_NEBIUS_MODEL: Final[str] = os.environ.get(
-    "NEBIUS_MODEL", "meta-llama/Meta-Llama-3.1-8B-Instruct-fast"
+    "NEBIUS_MODEL", "meta-llama/Meta-Llama-3.1-8B-Instruct"
 )
 
 # ── Console ───────────────────────────────────────────────────────────────────
