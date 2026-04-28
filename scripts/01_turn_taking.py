@@ -40,7 +40,7 @@ from scripts._utils import (
     play,
     section,
     step,
-    synthesize_with_pause,
+    synthesize,
     verdict,
     watch_this,
 )
@@ -64,123 +64,113 @@ header(
 
 # %%
 watch_this(
-    "I'll record someone saying their phone number — with a normal breath in the middle.\n"
-    "Deepgram (the ASR) will hear it as TWO things instead of one.\n"
-    "An agent built on raw Deepgram output will commit to the FIRST half.\n"
+    "I'll have someone read out a phone number — with a normal breath in the middle.\n"
+    "In a streaming voice agent, Deepgram emits a finalized transcript every time\n"
+    "it hears a pause. So our user breathing → Deepgram emits TWICE.\n"
+    "An agent built on raw Deepgram output commits to the FIRST half.\n"
     "Then I'll show the fix: a tiny LLM call between Deepgram and the agent.",
 )
 
 # %% [markdown]
-# ## Step 1 — Generate the audio
+# ## Step 1 — Generate the user's audio in two halves
 
 # %%
-TEST_PART_1 = "My number is zero, six, six, four..."
-TEST_PART_2 = "five, four, six, seven, five, six, zero."
-SILENCE_MS = 1000  # 1 full second — enough to force any reasonable ASR to endpoint
-TEST_AUDIO_PATH = AUDIO_DIR / "01_phone_with_pause.wav"
+PART_1_TEXT = "My number is zero, six, six, four..."
+PART_2_TEXT = "...five, four, six, seven, five, six, zero."
+BREATH_SECONDS = 1.0  # the audible pause between halves
 
-step(1, "Generate the user audio (with a real 1-second breath in the middle)")
+PART_1_AUDIO = AUDIO_DIR / "01_phone_part1.mp3"
+PART_2_AUDIO = AUDIO_DIR / "01_phone_part2.mp3"
+
+step(1, "Synthesize the two halves with Rime")
 console.print(
-    f'  [italic]"{TEST_PART_1}  [bold yellow]<1s breath>[/bold yellow]  {TEST_PART_2}"[/italic]'
+    f'  [italic]"{PART_1_TEXT}  '
+    f'[bold yellow]<{BREATH_SECONDS:.0f}s breath>[/bold yellow]  '
+    f'{PART_2_TEXT}"[/italic]'
 )
 
-with live_status("Asking Rime to speak both halves, splicing silence between them"):
-    synthesize_with_pause(TEST_PART_1, TEST_PART_2, TEST_AUDIO_PATH, silence_ms=SILENCE_MS)
+with live_status("Asking Rime to speak each half"):
+    synthesize(PART_1_TEXT, PART_1_AUDIO, audio_format="mp3")
+    synthesize(PART_2_TEXT, PART_2_AUDIO, audio_format="mp3")
 
-console.print(
-    f"  [green]✓[/green] {TEST_AUDIO_PATH.stat().st_size / 1024:.0f} KB written "
-    f"[dim]({TEST_AUDIO_PATH.name})[/dim]"
-)
-play(TEST_AUDIO_PATH, label="Listen — what a real user actually sounds like")
+console.print("  [green]✓[/green] Both halves written")
+
+# %% [markdown]
+# ## Step 2 — Listen. The breath is real. The agent is about to mishear it.
+
+# %%
+console.print()
+console.print("  [bold magenta]🔊 Listen — what a real user actually sounds like[/bold magenta]")
+play(PART_1_AUDIO, blocking=True, label=None)
+time.sleep(BREATH_SECONDS)  # the audible breath
+play(PART_2_AUDIO, blocking=True, label=None)
 pause_for_effect()
 
 # %% [markdown]
-# ## Step 2 — Send it to Deepgram, the way every voice agent does
+# ## Step 3 — Send each half to Deepgram (simulating streaming)
 
 # %%
-step(2, "Send to Deepgram with default settings (`utt_split=0.4` — 400ms)")
+step(2, "Hand each half to Deepgram, the way streaming voice agents do")
 narrate(
-    "This is the moment where production voice agents go wrong. "
-    "Deepgram does its job perfectly — it just defines 'done' as 'audio went silent for a beat'."
+    "In production, Deepgram streaming emits a finalized transcript "
+    "every time it detects a pause longer than ~400ms. Our user breathed → "
+    "two transcripts. We simulate that here by transcribing each half."
 )
 
 
 @dataclass
 class TranscriptSegment:
-    """One finalized utterance from Deepgram's perspective."""
+    """One finalized transcript from Deepgram."""
 
     text: str
-    start: float
-    end: float
     confidence: float
 
 
-def transcribe_with_endpointing(audio_path: Path) -> list[TranscriptSegment]:
-    """Transcribe with utterance-level endpointing enabled."""
+def transcribe_one(audio_path: Path) -> TranscriptSegment:
+    """Transcribe a single MP3 file and return its top alternative."""
     deepgram = DeepgramClient(DEEPGRAM_API_KEY)
     with audio_path.open("rb") as f:
         buffer_data = f.read()
 
-    payload: FileSource = {"buffer": buffer_data, "mimetype": "audio/wav"}
-    options = PrerecordedOptions(
-        model="nova-2",
-        smart_format=True,
-        utterances=True,
-        utt_split=0.4,
-    )
+    payload: FileSource = {"buffer": buffer_data, "mimetype": "audio/mp3"}
+    options = PrerecordedOptions(model="nova-2", smart_format=True)
 
     response = deepgram.listen.rest.v("1").transcribe_file(payload, options)
     response_dict = json.loads(response.to_json())
 
-    return [
-        TranscriptSegment(
-            text=u["transcript"],
-            start=u["start"],
-            end=u["end"],
-            confidence=u["confidence"],
-        )
-        for u in response_dict["results"].get("utterances", [])
-    ]
-
-
-with live_status("Transcribing with Deepgram nova-2"):
-    segments = transcribe_with_endpointing(TEST_AUDIO_PATH)
-
-# Show ONLY the count and the first segment's text — that's the headline.
-# We deliberately don't dump a full table here. Audience reads ONE thing.
-console.print()
-if len(segments) >= 2:
-    console.print(
-        f"  Deepgram heard the audio as [bold red]{len(segments)} separate transcripts:[/bold red]"
+    alt = response_dict["results"]["channels"][0]["alternatives"][0]
+    return TranscriptSegment(
+        text=alt.get("transcript", ""),
+        confidence=alt.get("confidence", 0.0),
     )
-    for i, seg in enumerate(segments, 1):
-        console.print(f'    [cyan]{i}.[/cyan] [yellow]"{seg.text}"[/yellow]')
-elif len(segments) == 1:
-    console.print("  Deepgram heard the audio as [bold]1 transcript:[/bold]")
-    console.print(f'    [yellow]"{segments[0].text}"[/yellow]')
 
+
+with live_status("Transcribing the two halves"):
+    seg1 = transcribe_one(PART_1_AUDIO)
+    seg2 = transcribe_one(PART_2_AUDIO)
+
+segments = [seg1, seg2]
+
+console.print()
+console.print(
+    f"  Deepgram emitted [bold red]{len(segments)} finalized transcripts:[/bold red]"
+)
+for i, seg in enumerate(segments, 1):
+    console.print(f"    [cyan]{i}.[/cyan] [yellow]\"{seg.text}\"[/yellow]")
 pause_for_effect(0.8)
 
 # %% [markdown]
 # ## What just happened
 
 # %%
-if len(segments) >= 2:
-    first_committed = segments[0].text
-    verdict(
-        "The agent acts on the FIRST transcript and never sees the rest.",
-        f'It would look up an account ending in "{first_committed.split()[-1] if first_committed else "???"}" — '
-        f"find nothing — and ask the user to repeat themselves.\n"
-        f"The user starts over. Trust drops. The agent's intelligence never had a chance.",
-        kind="fail",
-    )
-else:
-    verdict(
-        "Deepgram returned only one segment on this run.",
-        "The pause wasn't long enough to trigger a split. "
-        "Increase SILENCE_MS in the script and re-run, or lower utt_split.",
-        kind="info",
-    )
+verdict(
+    "The agent acts on the FIRST transcript and never sees the second.",
+    f'It commits to looking up an account ending in "{seg1.text.split()[-1] if seg1.text else "???"}" — '
+    f"finds nothing — and asks the user to start over.\n"
+    f"The user's full phone number was right there in transcript #2. "
+    f"The agent never got the chance.",
+    kind="fail",
+)
 
 # %% [markdown]
 # ## Step 3 — The fix: a tiny LLM call between ASR and agent
@@ -190,8 +180,7 @@ section("Now the fix")
 
 if not NEBIUS_API_KEY:
     narrate(
-        "[yellow]⚠ NEBIUS_API_KEY not set — skipping the fix demo. "
-        "Set it in .env to see the rest.[/yellow]"
+        "[yellow]⚠ NEBIUS_API_KEY not set — skipping the fix demo.[/yellow]"
     )
 else:
     narrate(
@@ -223,33 +212,30 @@ Output:"""
         t0 = time.time()
         response = llm_client.chat.completions.create(
             model=DEFAULT_NEBIUS_MODEL,
-            messages=[
-                {"role": "user", "content": SEMANTIC_TURN_PROMPT.format(transcript=transcript)}
-            ],
+            messages=[{"role": "user", "content": SEMANTIC_TURN_PROMPT.format(transcript=transcript)}],
             temperature=0,
             max_tokens=4,
         )
         latency = time.time() - t0
-        verdict_word = (response.choices[0].message.content or "").strip().upper()
-        return verdict_word.startswith("COMPLETE"), latency
+        word = (response.choices[0].message.content or "").strip().upper()
+        return word.startswith("COMPLETE"), latency
 
-    step(3, "Run each Deepgram segment through the LLM")
+    step(3, "Run each Deepgram segment through the LLM as it arrives")
     console.print()
 
     accumulated = ""
     final_transcript = ""
     for i, seg in enumerate(segments, 1):
         candidate = (accumulated + " " + seg.text).strip()
-        with live_status(f"Asking Llama: is '{candidate[:40]}...' a complete thought?"):
+        with live_status(f"Asking Llama: is '{candidate[:40]}…' a complete thought?"):
             complete, latency = is_complete_thought(candidate)
 
         verdict_label = (
-            "[green]COMPLETE → respond now[/green]"
-            if complete
+            "[green]COMPLETE → respond now[/green]" if complete
             else "[yellow]INCOMPLETE → wait for more[/yellow]"
         )
         console.print(
-            f'  [cyan]{i}.[/cyan] [yellow]"{candidate[:60]}"[/yellow]  '
+            f"  [cyan]{i}.[/cyan] [yellow]\"{candidate[:60]}\"[/yellow]  "
             f"→ {verdict_label}  [dim]({latency * 1000:.0f}ms)[/dim]"
         )
         if complete:
@@ -260,7 +246,8 @@ Output:"""
     if final_transcript:
         verdict(
             "The agent now sees the FULL phone number.",
-            f'It commits on:  "{final_transcript}"\nNo restart. No frustrated user. Trust intact.',
+            f'It commits on:  "{final_transcript}"\n'
+            f"No restart. No frustrated user. Trust intact.",
             kind="win",
         )
     else:
@@ -283,7 +270,5 @@ console.print(
 )
 
 console.print()
-console.print(
-    "[bold magenta]Next:[/bold magenta]  [green]make script-02[/green]   [dim]— Backchannels vs interrupts[/dim]"
-)
+console.print("[bold magenta]Next:[/bold magenta]  [green]make script-02[/green]   [dim]— Backchannels vs interrupts[/dim]")
 console.print()

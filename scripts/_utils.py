@@ -9,31 +9,28 @@ Specifically:
 2. Provides a single, friendly Rich console for consistent script output.
 3. Provides a shared `make_llm_client()` factory that returns a Nebius-backed
    OpenAI client — with sensible timeouts and retries.
-4. Provides `synthesize()` / `synthesize_with_pause()` / `play()` helpers so
-   every script speaks audio the same way and plays it through the speakers.
+4. Provides `synthesize()` and `play()` helpers so every script speaks audio
+   the same way and plays it through the speakers.
 5. Provides projector-friendly narrative helpers (`header`, `verdict`,
    `narrate`, `live_status`) so the scripts feel like a presentation rather
    than a wall of tables.
 6. Provides cheap "is this credential actually valid?" health checks
    that the Makefile and `verify_setup.py` call before running the scripts.
 
-Why MP3 for most scripts but WAV for `synthesize_with_pause()`? MP3 plays
-everywhere out of the box and Deepgram ingests it natively. But splicing
-silence into MP3 reliably requires ffmpeg, which we don't want as a hard
-dep. WAV manipulation, on the other hand, is in Python's stdlib (`wave`).
-So we use WAV when we need to manipulate audio, MP3 otherwise.
+We use MP3 throughout. It plays everywhere out of the box, Deepgram ingests
+it natively, and we don't need ffmpeg to manipulate it (we never do — when
+we need to insert silence between two clips, we just play one, sleep, play
+the other, and send each to Deepgram separately).
 """
 
 from __future__ import annotations
 
-import io
 import os
 import platform
 import shutil
 import subprocess
 import sys
 import time
-import wave
 from collections.abc import Iterator
 from contextlib import contextmanager
 from pathlib import Path
@@ -172,68 +169,6 @@ def synthesize(
         speed_alpha=speed_alpha,
     )
     output_path.write_bytes(audio_bytes)
-    return output_path
-
-
-def synthesize_with_pause(
-    text_part1: str,
-    text_part2: str,
-    output_path: Path,
-    *,
-    silence_ms: int = 800,
-    speaker: str = "abbie",
-    model_id: str = "mistv2",
-    speed_alpha: float = 1.0,
-) -> Path:
-    """Synthesize two text halves and splice GUARANTEED silence between them.
-
-    This is what we use for Failure 01 — Rime's natural pauses on "..." aren't
-    reliable enough to force Deepgram to split the audio into two utterances,
-    so we generate the two halves separately and inject a deterministic
-    silence gap.
-
-    Uses WAV throughout (Rime returns WAV, stdlib `wave` mixes them) — no
-    ffmpeg required. The output WAV is rebuilt by Python's wave module, so
-    its header is canonical and Deepgram parses it without complaint.
-    """
-    sampling_rate = 22050  # Rime's WAV default
-
-    part1 = _rime_post(
-        text_part1,
-        audio_format="wav",
-        speaker=speaker,
-        model_id=model_id,
-        speed_alpha=speed_alpha,
-        sampling_rate=sampling_rate,
-    )
-    part2 = _rime_post(
-        text_part2,
-        audio_format="wav",
-        speaker=speaker,
-        model_id=model_id,
-        speed_alpha=speed_alpha,
-        sampling_rate=sampling_rate,
-    )
-
-    # Read each WAV via stdlib `wave`. This also normalises the headers —
-    # Rime's RIFF chunk is sometimes non-canonical, but `wave` reads the
-    # essentials and our re-write uses a clean header.
-    with wave.open(io.BytesIO(part1), "rb") as w1:
-        params = w1.getparams()
-        frames1 = w1.readframes(w1.getnframes())
-    with wave.open(io.BytesIO(part2), "rb") as w2:
-        frames2 = w2.readframes(w2.getnframes())
-
-    # Generate silence at the same params as part 1.
-    n_silence_samples = int(params.framerate * silence_ms / 1000)
-    silence = b"\x00" * (n_silence_samples * params.sampwidth * params.nchannels)
-
-    with wave.open(str(output_path), "wb") as out:
-        out.setparams(params)
-        out.writeframes(frames1)
-        out.writeframes(silence)
-        out.writeframes(frames2)
-
     return output_path
 
 

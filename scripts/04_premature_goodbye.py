@@ -63,7 +63,8 @@ header(
 # %%
 watch_this(
     "I'll run the same model on the same conversation 8 times.\n"
-    "First as a pure agentic agent — just a prompt. Watch how often it says GOODBYE.\n"
+    "First as a pure agentic agent — just a prompt that says 'be efficient'.\n"
+    "  Watch how often it says GOODBYE before checking if the user is done.\n"
     "Then with a deterministic guardrail — same prompt, but the harness blocks goodbyes.\n"
     "Listen to the difference at the end.",
 )
@@ -78,7 +79,12 @@ llm_client = make_llm_client()
 CONVERSATION = [
     {
         "role": "system",
-        "content": "You are a friendly billing support agent for a phone company. Keep replies short — one or two sentences, suitable for voice.",
+        "content": (
+            "You are a billing support agent for a phone company. "
+            "Be efficient and respect the user's time — when their question is "
+            "answered, wrap up the call cleanly. Keep replies short, one or two "
+            "sentences max."
+        ),
     },
     {
         "role": "user",
@@ -93,7 +99,7 @@ CONVERSATION = [
         "role": "assistant",
         "content": "Yes, exactly. The device fee is $124, applied once during the billing cycle when the upgrade was processed.",
     },
-    {"role": "user", "content": "Alright that makes sense."},
+    {"role": "user", "content": "Got it. Thanks!"},
 ]
 
 step(1, "The conversation up to the moment the agent must decide what to say")
@@ -104,7 +110,7 @@ for msg in CONVERSATION[1:]:
     else:
         console.print(f"  [bold magenta]🤖 Agent:[/bold magenta] [dim]{msg['content']}[/dim]")
 console.print()
-narrate("[italic]'Alright that makes sense' SOUNDS like a closure. It isn't.[/italic]")
+narrate("[italic]'Got it. Thanks!' SOUNDS like a closure. The user might still have more.[/italic]")
 
 
 # %% [markdown]
@@ -142,8 +148,9 @@ def is_premature_goodbye(reply: str) -> bool:
 # %%
 section(f"Agent A — pure agentic ({NUM_RUNS} runs)")
 narrate(
-    "No deterministic guardrails. Temperature 0.7. The model picks its own words. "
-    "Watch the [bold red]GOODBYE[/bold red] markers."
+    "Just the prompt. No deterministic guardrails. Temperature 0.9. "
+    "We're looking for the runs where the model says [bold red]GOODBYE[/bold red] "
+    "without checking whether the user is actually done."
 )
 
 
@@ -155,7 +162,7 @@ def run_agent_a(conversation: list[dict[str, str]]) -> str:
     response = llm_client.chat.completions.create(
         model=DEFAULT_NEBIUS_MODEL,
         messages=messages,  # type: ignore[arg-type]
-        temperature=0.7,
+        temperature=0.9,
         max_tokens=80,
     )
     return (response.choices[0].message.content or "").strip()
@@ -181,12 +188,21 @@ for i in range(NUM_RUNS):
 
 agent_a_pct = int(100 * agent_a_failures / NUM_RUNS)
 
-verdict(
-    f"Agent A said GOODBYE on {agent_a_failures}/{NUM_RUNS} runs ({agent_a_pct}%).",
-    f"At 1M calls/month that's {agent_a_failures * 1_000_000 // NUM_RUNS:,} prematurely-ended calls. "
-    f"Each one is a customer who has to call back. Each one is a compliance risk in regulated industries.",
-    kind="fail" if agent_a_failures > 0 else "info",
-)
+if agent_a_failures > 0:
+    verdict(
+        f"Agent A said GOODBYE on {agent_a_failures}/{NUM_RUNS} runs ({agent_a_pct}%).",
+        f"At 1M calls/month that's {agent_a_failures * 1_000_000 // NUM_RUNS:,} prematurely-ended calls. "
+        f"Each one is a customer who has to call back. Each one is a compliance risk in regulated industries.",
+        kind="fail",
+    )
+else:
+    verdict(
+        f"This run, Agent A went 0/{NUM_RUNS} on premature goodbyes.",
+        "The failure is intermittent — re-run a few times to see it surface. "
+        "The point of progressive control is that you don't have to hope: "
+        "the gate rules out the failure mode entirely.",
+        kind="info",
+    )
 
 pause_for_effect(0.5)
 
@@ -219,7 +235,7 @@ def run_agent_b(conversation: list[dict[str, str]], state: CallState) -> tuple[s
     response = llm_client.chat.completions.create(
         model=DEFAULT_NEBIUS_MODEL,
         messages=messages,  # type: ignore[arg-type]
-        temperature=0.7,
+        temperature=0.9,
         max_tokens=80,
     )
     candidate = (response.choices[0].message.content or "").strip()

@@ -128,8 +128,3 @@ def test_projector_helpers_exist():
     assert callable(_utils.watch_this)
     assert callable(_utils.verdict)
     assert callable(_utils.big_compare)
-
-
-def test_synthesize_with_pause_helper_exists():
-    """The pause-injection helper for Failure 01 is importable."""
-    assert callable(_utils.synthesize_with_pause)
