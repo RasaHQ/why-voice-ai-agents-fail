@@ -15,21 +15,9 @@
 #
 # > The user says their phone number. The system commits to it after the third digit.
 #
-# This script demonstrates the most common voice-agent failure on Earth: the ASR
-# finalizes a transcript at an acoustic pause that the user did not intend as the
-# end of their turn. Your agent acts on incomplete data, looks foolish, and the
-# user has to start over.
-#
-# **What you'll see:**
-#
-# 1. We synthesize a phone number being spoken with a natural mid-sentence pause
-#    (using **Rime** for TTS).
-# 2. We feed that audio into **Deepgram** for transcription.
-# 3. We watch Deepgram emit a *finalized* transcript at the pause — the failure mode.
-# 4. We add a **semantic turn-taking layer** and watch the same audio produce the
-#    correct, complete transcript.
-#
-# **Total runtime:** ~30 seconds. **Cost:** ~$0.005.
+# This is the most common voice failure on Earth. We're going to make it
+# happen, in real time, with real Rime audio and a real Deepgram call.
+# Then we'll fix it with a small LLM layer and run the same audio through.
 #
 # Run from the repo root:
 #
@@ -45,9 +33,7 @@ import time
 from dataclasses import dataclass
 from pathlib import Path
 
-import requests
 from deepgram import DeepgramClient, FileSource, PrerecordedOptions
-from rich.panel import Panel
 from rich.table import Table
 
 from scripts._utils import (
@@ -55,73 +41,72 @@ from scripts._utils import (
     console,
     ensure_audio_dir,
     get_key,
+    header,
+    live_status,
     make_llm_client,
+    narrate,
+    pause_for_effect,
+    play,
+    punchline,
+    section,
+    step,
+    synthesize,
 )
 
 # %% [markdown]
-# ## Step 1 — Load credentials
+# ## Setup
 
 # %%
 DEEPGRAM_API_KEY = get_key("DEEPGRAM_API_KEY")
-RIME_API_KEY = get_key("RIME_API_KEY")
 NEBIUS_API_KEY = get_key("NEBIUS_API_KEY", required=False)
+get_key("RIME_API_KEY")  # eager-checked, raises if missing
 AUDIO_DIR = ensure_audio_dir()
 
-console.print(Panel.fit("[bold cyan]Failure 01 — Turn-taking[/bold cyan]"))
+header(
+    "Failure 01 — Turn-taking is harder than you think",
+    "ASR endpoints on acoustic silence. Humans endpoint on semantic completion. "
+    "Same audio, different meaning.",
+)
+
+narrate(
+    "I'm going to make a voice agent commit to a half-spoken phone number. "
+    "Watch — and listen. The fix is one small LLM call.",
+    style="italic dim",
+)
 
 # %% [markdown]
-# ## Step 2 — Synthesize the test audio with Rime
+# ## Step 1 — Synthesize a phone number with a natural breath
 #
-# We generate audio of a user speaking a phone number with a natural mid-sentence
-# pause. The phrase: *"My number is zero six six four... five four six seven five
-# six zero."* The "..." after "four" is what creates the failure-inducing pause —
-# a real user does this all the time when recalling a number from memory.
+# We use Rime to generate a phone number being spoken by a real human-sounding
+# voice, with a natural mid-sentence pause after "four" — the kind of pause
+# every user does when recalling a number from memory.
 
 # %%
 TEST_PHRASE = "My number is zero six six four... five four six seven five six zero."
-TEST_AUDIO_PATH = AUDIO_DIR / "01_phone_number_with_pause.wav"
+TEST_AUDIO_PATH = AUDIO_DIR / "01_phone_number.mp3"
 
+step(1, "Synthesize a phone number — with a natural breath in the middle")
+console.print(f'  [italic dim]"{TEST_PHRASE}"[/italic dim]')
 
-def synthesize_with_rime(text: str, output_path: Path) -> None:
-    """Generate audio from text using Rime TTS.
+with live_status("Asking Rime to speak it"):
+    synthesize(TEST_PHRASE, TEST_AUDIO_PATH, audio_format="mp3")
 
-    We use Rime's `mistv2` model which has good control over pausing and pacing.
-    Output is a WAV file at 16kHz mono — the format Deepgram prefers.
-    """
-    response = requests.post(
-        "https://users.rime.ai/v1/rime-tts",
-        headers={
-            "Authorization": f"Bearer {RIME_API_KEY}",
-            "Accept": "audio/wav",
-            "Content-Type": "application/json",
-        },
-        json={
-            "speaker": "abbie",
-            "text": text,
-            "modelId": "mistv2",
-            "samplingRate": 16000,
-            "pauseBetweenBrackets": True,
-        },
-        timeout=30,
-    )
-    response.raise_for_status()
-    output_path.write_bytes(response.content)
-
-
-console.print(f"[blue]→[/blue] Synthesizing: [italic]{TEST_PHRASE!r}[/italic]")
-synthesize_with_rime(TEST_PHRASE, TEST_AUDIO_PATH)
 audio_size_kb = TEST_AUDIO_PATH.stat().st_size / 1024
-console.print(f"[green]✓[/green] Audio written: {TEST_AUDIO_PATH} ({audio_size_kb:.1f} KB)")
+console.print(f"  [green]✓[/green] {audio_size_kb:.1f} KB written")
+play(TEST_AUDIO_PATH, label="Listen — what a real user sounds like")
+pause_for_effect()
 
 # %% [markdown]
-# ## Step 3 — Send to Deepgram and watch the failure
+# ## Step 2 — Hand the audio to Deepgram, the way every voice agent does
 #
-# We stream the audio into Deepgram's pre-recorded API. The failure is visible in
-# the response: there will be **multiple** finalized utterances instead of one
-# continuous transcript. Each finalized utterance is a moment where Deepgram
-# decided the user was done talking — and your agent would have reacted to each.
+# This is the moment where production voice agents go wrong. Deepgram does
+# its job perfectly: it turns audio into text. But its definition of "the user
+# is done" is "audio went silent for a beat" — which doesn't match the human
+# definition.
 
 # %%
+step(2, "Send to Deepgram — same way a production voice agent would")
+
 deepgram = DeepgramClient(DEEPGRAM_API_KEY)
 
 
@@ -138,18 +123,19 @@ class TranscriptSegment:
 def transcribe_with_endpointing(audio_path: Path) -> list[TranscriptSegment]:
     """Transcribe audio with utterance-level endpointing enabled.
 
-    This is the failure in action. `utterances=True` causes Deepgram to split
-    the audio wherever it hears a pause longer than the endpointing threshold.
+    Note we pass `mimetype="audio/mp3"` explicitly. Deepgram can usually
+    auto-detect format, but it occasionally fails on Rime's output —
+    explicit is better.
     """
     with audio_path.open("rb") as f:
         buffer_data = f.read()
 
-    payload: FileSource = {"buffer": buffer_data}
+    payload: FileSource = {"buffer": buffer_data, "mimetype": "audio/mp3"}
     options = PrerecordedOptions(
         model="nova-2",
         smart_format=True,
         utterances=True,
-        utt_split=0.4,
+        utt_split=0.4,  # split on pauses ≥400ms — Deepgram's default
     )
 
     response = deepgram.listen.rest.v("1").transcribe_file(payload, options)
@@ -168,14 +154,17 @@ def transcribe_with_endpointing(audio_path: Path) -> list[TranscriptSegment]:
     return segments
 
 
-console.print("\n[bold]🎤 Sending audio to Deepgram with default endpointing...[/bold]")
-segments = transcribe_with_endpointing(TEST_AUDIO_PATH)
+with live_status("Transcribing with Deepgram nova-2"):
+    segments = transcribe_with_endpointing(TEST_AUDIO_PATH)
 
-table = Table(title=f"Deepgram returned {len(segments)} finalized utterance(s)")
+table = Table(
+    title=f"What Deepgram heard — [bold red]{len(segments)} separate utterance(s)[/bold red]",
+    title_style="white",
+)
 table.add_column("#", style="cyan", width=3)
-table.add_column("Start", justify="right", style="white")
-table.add_column("End", justify="right", style="white")
-table.add_column("Confidence", justify="right")
+table.add_column("Start", justify="right")
+table.add_column("End", justify="right")
+table.add_column("Conf", justify="right")
 table.add_column("Transcript", style="yellow")
 
 for i, seg in enumerate(segments, 1):
@@ -184,46 +173,53 @@ for i, seg in enumerate(segments, 1):
         f"{seg.start:.2f}s",
         f"{seg.end:.2f}s",
         f"{seg.confidence:.2f}",
-        seg.text,
+        f'"{seg.text}"',
     )
+console.print()
 console.print(table)
+pause_for_effect()
 
 # %% [markdown]
 # ### What just happened
-#
-# You should see **two or more** finalized utterances. Something like:
-#
-# ```
-# 1. [0.05s →  1.85s] 'My number is zero six six four' (conf=0.97)
-# 2. [2.40s →  4.20s] 'five four six seven five six zero.' (conf=0.96)
-# ```
-#
-# This is what your agent sees in real time. After the first finalized
-# transcript arrives, your agent thinks the user is done. It looks up account
-# `06664`. It finds nothing. It asks the user to repeat themselves.
-#
-# **The user has to start over.**
-
-# %% [markdown]
-# ## Step 4 — The fix: a semantic turn-taking layer
-#
-# The fix is not "find a better ASR." Even with the best ASR, acoustic pauses
-# don't reliably indicate semantic completion. The fix is a layer between
-# Deepgram and your agent that asks a different question:
-#
-# > Is this transcript a *complete thought*, or a fragment with more probably coming?
-#
-# This is a small, fast LLM call. We use Nebius's `Meta-Llama-3.1-8B-Instruct-fast`
-# (the default, configurable via NEBIUS_MODEL) because it's cheap and sub-second.
-# Any small model will do — Qwen3, MiniMax, DeepSeek, you name it.
 
 # %%
-if not NEBIUS_API_KEY:
-    console.print(
-        "\n[yellow]⚠ NEBIUS_API_KEY not set — skipping the semantic turn-taking demo.[/yellow]"
+if len(segments) > 1:
+    punchline(
+        f"The user said ONE thing — their phone number.\n"
+        f"The agent received {len(segments)} transcripts and would act on the first one.\n"
+        f"It would look up account '{segments[0].text.split()[-1] if segments[0].text else '???'}', "
+        f"find nothing, and ask the user to start over.",
+        kind="fail",
     )
-    console.print("  Set the key and re-run to see the fix in action.\n")
 else:
+    narrate(
+        "Heads up: Deepgram returned only one segment this run. The split happens "
+        "more reliably with longer pauses — try TEST_PHRASE with extra '...' to force it.",
+        style="yellow",
+    )
+
+# %% [markdown]
+# ## Step 3 — The fix: a semantic turn-taking layer
+#
+# The fix isn't a smarter ASR. It's a small, fast LLM call that asks a
+# different question: "Is this transcript a complete thought?" Layer that
+# between Deepgram and your agent and the failure goes away.
+
+# %%
+section("The fix — semantic turn-taking layer")
+
+if not NEBIUS_API_KEY:
+    narrate(
+        "[yellow]⚠ NEBIUS_API_KEY not set — skipping the fix demo. "
+        "Add it to .env to see the full pattern.[/yellow]"
+    )
+else:
+    narrate(
+        "We layer a small LLM call between Deepgram and the agent. The LLM "
+        "answers one question: 'Is this a complete thought, or is the user "
+        "still talking?' Cheap (~$0.0001), fast (~250-600ms), correct.",
+    )
+
     llm_client = make_llm_client()
 
     SEMANTIC_TURN_PROMPT = """You analyze partial transcripts from a voice agent.
@@ -264,52 +260,58 @@ Output:"""
         verdict = (response.choices[0].message.content or "").strip().upper()
         return verdict.startswith("COMPLETE"), latency
 
-    console.print("\n[bold]🧠 Adding semantic turn-taking layer...[/bold]\n")
-    fix_table = Table(show_header=True)
-    fix_table.add_column("Accumulated transcript", style="yellow", width=50)
+    fix_table = Table(title="Semantic turn-taking layer", show_header=True)
+    fix_table.add_column("Accumulated transcript", style="yellow", max_width=60)
     fix_table.add_column("Verdict", justify="center")
     fix_table.add_column("Latency", justify="right")
 
     accumulated = ""
+    final_transcript = ""
     for seg in segments:
         candidate = (accumulated + " " + seg.text).strip()
-        is_complete, latency = is_complete_thought(candidate)
-        verdict = "[green]COMPLETE ✓[/green]" if is_complete else "[red]INCOMPLETE ✗[/red]"
-        fix_table.add_row(candidate[:48], verdict, f"{latency * 1000:.0f}ms")
-        if not is_complete:
-            accumulated = candidate
-        else:
-            console.print(fix_table)
-            console.print(
-                f"\n[bold green]→ Final transcript sent to agent:[/bold green] {candidate!r}"
-            )
+        with live_status(f"Asking Llama: is '{candidate[:40]}...' complete?"):
+            complete, latency = is_complete_thought(candidate)
+        verdict = "[green]COMPLETE ✓[/green]" if complete else "[red]INCOMPLETE ⏸[/red]"
+        fix_table.add_row(candidate[:60], verdict, f"{latency * 1000:.0f}ms")
+        if complete:
+            final_transcript = candidate
             break
+        accumulated = candidate
+
+    console.print(fix_table)
+
+    if final_transcript:
+        punchline(
+            f"The agent now acts on the FULL transcript:\n"
+            f'   "{final_transcript}"\n'
+            f"No restart. No frustrated user. Trust intact.",
+            kind="win",
+        )
     else:
-        console.print(fix_table)
-
-
-# %% [markdown]
-# ### What the fix does
-#
-# After the first Deepgram utterance, the semantic layer says INCOMPLETE — the
-# transcript ends with a digit and no terminator. The agent waits.
-#
-# After the second Deepgram utterance, the accumulated transcript is now
-# complete. The semantic layer says COMPLETE. The agent responds — to the
-# *full* phone number, the way the user actually said it.
-#
-# **This is the pattern.** ASR-level endpointing tells you when audio went
-# silent. A semantic layer tells you when the human is done.
+        narrate(
+            "All segments were marked INCOMPLETE. In production you'd commit "
+            "after a max wait timer expires.",
+            style="yellow",
+        )
 
 # %% [markdown]
-# ## Recap
-#
-# - ✅ ASR engines endpoint on **acoustic** silence; humans endpoint on
-#   **semantic** completion. These are not the same thing.
-# - ✅ The fix is a **post-processing layer** between ASR and agent that asks
-#   a different question: is the transcript a complete thought?
-# - ✅ This costs ~250-600ms of added latency per check. The cost of *not*
-#   doing it is users repeating themselves.
-#
-# **Next:** `02_backchannels_vs_interrupts.py` — when one syllable means two
-# different things and your agent has to know which.
+# ## The takeaway
+
+# %%
+section("Takeaway")
+console.print(
+    "  [bold]ASR endpoints on acoustic silence.[/bold] That's its job.\n"
+    "  [bold]Humans endpoint on semantic completion.[/bold] That's the real signal.\n"
+    "  [bold cyan]A small LLM layer turns one into the other.[/bold cyan]\n"
+)
+console.print(
+    "  [dim]200ms pause after 'zero six six' = breath.[/dim]\n"
+    "  [dim]200ms pause after '...does that work?' = waiting for an answer.[/dim]\n"
+    "  [dim]Same audio. Different meaning. Only the harness can tell.[/dim]\n"
+)
+
+console.print()
+console.print(
+    "[bold magenta]Next:[/bold magenta]  make script-02   [dim]— Backchannels vs interrupts[/dim]"
+)
+console.print()

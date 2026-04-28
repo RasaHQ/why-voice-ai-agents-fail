@@ -18,23 +18,9 @@
 # > "Of course! Have a great day!" *Click.* — Agent
 #
 # This is the failure that costs you customers. The user says something that
-# sounds like a goodbye but isn't. The agent — running on a pure agentic
+# *sounds* like a goodbye but isn't. The agent — running on a pure-agentic
 # architecture with full LLM freedom over the words — decides the call is
-# over. It hangs up. The user, mid-thought, has to call back.
-#
-# **What you'll see:**
-#
-# 1. Two voice agents with the same model and same system prompt.
-# 2. **Agent A** is pure agentic — soft instructions in the prompt, full LLM
-#    freedom. The current default in 2026.
-# 3. **Agent B** uses **progressive control** — agentic by default, with a
-#    deterministic guardrail blocking the call from ending until a wrap-up
-#    flow has run.
-# 4. Both agents see the same conversation, ending with "alright that makes
-#    sense." We synthesize the endings with **Rime** so you can hear the
-#    difference.
-#
-# **Total runtime:** ~30 seconds. **Cost:** ~$0.005.
+# over. Hangs up. The user, mid-thought, has to call back.
 #
 # Run from the repo root:
 #
@@ -46,10 +32,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from pathlib import Path
 
-import requests
-from rich.panel import Panel
 from rich.table import Table
 
 from scripts._utils import (
@@ -57,28 +40,46 @@ from scripts._utils import (
     console,
     ensure_audio_dir,
     get_key,
+    header,
+    live_status,
     make_llm_client,
+    narrate,
+    pause_for_effect,
+    play,
+    punchline,
+    section,
+    step,
+    synthesize,
 )
 
 # %% [markdown]
 # ## Setup
 
 # %%
-RIME_API_KEY = get_key("RIME_API_KEY")
-NEBIUS_API_KEY = get_key("NEBIUS_API_KEY")
+get_key("RIME_API_KEY")
+get_key("NEBIUS_API_KEY")
 AUDIO_DIR = ensure_audio_dir()
 
-console.print(Panel.fit("[bold cyan]Failure 04 — The bot says goodbye too soon[/bold cyan]"))
+header(
+    "Failure 04 — The bot says goodbye too soon",
+    "Soft instructions in the system prompt fail in exactly the conditions "
+    "that matter most. Progressive control is the architectural fix.",
+)
+
+narrate(
+    "I'm going to run the same model with the same prompt twice. "
+    "First as a pure agentic agent (today's default). Second with a "
+    "deterministic guardrail that the LLM cannot override.",
+    style="italic dim",
+)
+
+# Llama 3.1 8B Instruct (no -fast variant currently on Nebius) takes a few
+# seconds per call; the shared client already sets a 60s timeout and
+# 2 retries, which keeps us well clear of the hangs we saw earlier.
 llm_client = make_llm_client()
 
 # %% [markdown]
-# ## Step 1 — The conversation we'll test
-#
-# This is a real-ish billing inquiry. The user has been authenticated, the
-# agent has explained the bill, and the user says something that sounds like
-# closure. In production this is exactly where agents fail — they read the
-# user's "alright that makes sense" as goodbye, when it's actually
-# acknowledgement of one specific thing with more conversation likely.
+# ## The conversation we'll test
 
 # %%
 CONVERSATION = [
@@ -102,14 +103,21 @@ CONVERSATION = [
     {"role": "user", "content": "Alright that makes sense."},
 ]
 
-console.print("\n[bold]Test conversation:[/bold]\n")
+step(1, "The conversation we'll test")
+console.print()
 for msg in CONVERSATION[1:]:
-    speaker = "[cyan]USER[/cyan]" if msg["role"] == "user" else "[magenta]AGENT[/magenta]"
-    console.print(f"  {speaker} {msg['content']}")
-console.print("\n→ The agent now needs to decide what to say next.\n")
+    if msg["role"] == "user":
+        console.print(f"  [bold cyan]👤 User:[/bold cyan]  [white]{msg['content']}[/white]")
+    else:
+        console.print(f"  [bold magenta]🤖 Agent:[/bold magenta] [dim]{msg['content']}[/dim]")
+console.print()
+narrate(
+    "[italic]The agent now has to decide what to say next. "
+    "Watch how often a soft instruction in the system prompt fails to hold.[/italic]"
+)
 
 # %% [markdown]
-# ## Step 2 — Agent A: pure agentic (the failure)
+# ## Agent A — pure agentic (the failure)
 #
 # Soft instruction in the prompt: "Always ask if there's anything else
 # before ending the call." This is the standard 2026 pattern. Most of the
@@ -122,6 +130,8 @@ Keep replies short and natural for voice.
 
 Important: Always ask if there's anything else before ending the call.
 Do not say goodbye unless the user has explicitly indicated they are done."""
+
+NUM_RUNS = 5
 
 
 def run_agent_a(conversation: list[dict[str, str]]) -> str:
@@ -164,16 +174,23 @@ def asks_anything_else(reply: str) -> bool:
     return any(m in reply.lower() for m in markers)
 
 
-console.print("[bold]🤖 AGENT A (pure agentic) — running 5 times to show variance[/bold]\n")
+section("Agent A — pure agentic")
 
-agent_a_table = Table()
-agent_a_table.add_column("Run", justify="right", style="cyan")
-agent_a_table.add_column("Outcome", justify="center")
+narrate(
+    f"Running the same prompt {NUM_RUNS} times. Temperature 0.7, so each run "
+    f"can pick different words. We're looking for the runs where the model "
+    f"says 'have a great day!' instead of asking if there's anything else.",
+)
+
+agent_a_table = Table(title=f"Agent A — {NUM_RUNS} runs", show_header=True)
+agent_a_table.add_column("#", style="cyan", justify="right", width=3)
+agent_a_table.add_column("Outcome", justify="center", width=14)
 agent_a_table.add_column("Reply", style="yellow")
 
 agent_a_replies: list[str] = []
-for i in range(5):
-    reply = run_agent_a(CONVERSATION)
+for i in range(NUM_RUNS):
+    with live_status(f"Agent A — run {i + 1}/{NUM_RUNS}"):
+        reply = run_agent_a(CONVERSATION)
     agent_a_replies.append(reply)
     is_goodbye = detect_closure_attempt(reply) and not asks_anything_else(reply)
     marker = "[red]❌ premature[/red]" if is_goodbye else "[green]✓ asks more[/green]"
@@ -183,28 +200,38 @@ console.print(agent_a_table)
 failures = sum(
     1 for r in agent_a_replies if detect_closure_attempt(r) and not asks_anything_else(r)
 )
-console.print(f"\n[red]Premature goodbyes: {failures}/5 = {failures * 20}%[/red]")
+fail_pct = int(failures / NUM_RUNS * 100)
 
 # %% [markdown]
 # ### What just happened
-#
-# Run that loop a few times. You'll see:
-#
-# - Most runs: the agent follows the instruction and asks if there's anything else
-# - **Some runs: the agent says "Have a great day!" and ends the call**
-#
-# 20% failure rate isn't catastrophic in isolation — but at 1M calls per
-# month that's 200,000 prematurely-ended calls. **The model isn't broken.**
-# Soft instructions simply don't have enough weight to override a
-# conversational pattern the model has seen millions of times.
+
+# %%
+if failures > 0:
+    punchline(
+        f"{failures}/{NUM_RUNS} runs ({fail_pct}%) ended the call early.\n"
+        f"In a 1M-call month, that's {failures * 200_000} prematurely-ended calls.\n"
+        f"Soft instructions don't hold when temperature is 0.7 and the model has "
+        f"seen 'alright that makes sense' → 'have a great day!' a million times in training.",
+        kind="fail",
+    )
+else:
+    punchline(
+        f"On this run, Agent A said 'asks more' on all {NUM_RUNS} attempts — "
+        f"the soft instruction held this time. That's the problem with this "
+        f"failure mode: it's intermittent. The model misbehaves often enough "
+        f"to be a compliance issue, rarely enough that you don't catch it in QA.",
+        kind="info",
+    )
+
+pause_for_effect()
 
 # %% [markdown]
-# ## Step 3 — Agent B: progressive control (the fix)
+# ## Agent B — progressive control (the fix)
 #
-# Same model. Same system prompt. **Different harness.** We add a
-# deterministic layer that the LLM cannot override. The framework tracks
-# whether a "wrap-up" has run. If it hasn't, any attempt by the LLM to
-# end the call gets intercepted and rewritten.
+# Same model. Same system prompt. **Different harness.** We add a deterministic
+# layer that the LLM cannot override. The framework checks every output for
+# closure intent. If it finds one before the wrap-up has run, it intercepts
+# and asks the LLM to try again with stronger guidance.
 
 
 # %%
@@ -223,7 +250,6 @@ def run_agent_b(
     state: CallState,
 ) -> tuple[str, CallState]:
     """Progressive control: agentic + deterministic guardrails."""
-
     messages: list[dict[str, str]] = [
         {"role": "system", "content": SYSTEM_PROMPT_AGENT_A},
         *conversation[1:],
@@ -240,14 +266,17 @@ def run_agent_b(
     if detect_closure_attempt(candidate) and not state.user_confirmed_done:
         state.wrapup_started = True
 
-        # Override with a wrap-up question. The LLM gets to phrase it; we
-        # constrain the *intent*. In a real system this would call the LLM
-        # again with a more directive prompt, or use a templated response.
+        # Override with a wrap-up question. The LLM gets to phrase it; the
+        # harness owns the *intent*. In production this would call the LLM
+        # again with a directive system message, or use a templated response.
         wrapup_messages: list[dict[str, str]] = [
             *messages,
             {
                 "role": "system",
-                "content": "Do NOT say goodbye. Instead, briefly check if the user has any other questions about their bill. One short sentence.",
+                "content": (
+                    "Do NOT say goodbye. Instead, briefly check if the user has any "
+                    "other questions about their bill. One short sentence."
+                ),
             },
         ]
         wrapup_response = llm_client.chat.completions.create(
@@ -261,63 +290,46 @@ def run_agent_b(
     return candidate, state
 
 
-console.print("\n[bold]✅ AGENT B (progressive control) — same 5 runs[/bold]\n")
+section("Agent B — progressive control")
 
-agent_b_table = Table()
-agent_b_table.add_column("Run", justify="right", style="cyan")
-agent_b_table.add_column("Outcome", justify="center")
+narrate(
+    f"Running the same {NUM_RUNS} times with the harness intercepting any "
+    f"goodbye attempt before the wrap-up has run.",
+)
+
+agent_b_table = Table(title=f"Agent B — {NUM_RUNS} runs", show_header=True)
+agent_b_table.add_column("#", style="cyan", justify="right", width=3)
+agent_b_table.add_column("Outcome", justify="center", width=24)
 agent_b_table.add_column("Reply", style="yellow")
 
 agent_b_replies: list[str] = []
-for i in range(5):
+intercepted_count = 0
+for i in range(NUM_RUNS):
     state = CallState()
-    reply, state = run_agent_b(CONVERSATION, state)
+    with live_status(f"Agent B — run {i + 1}/{NUM_RUNS}"):
+        reply, state = run_agent_b(CONVERSATION, state)
     agent_b_replies.append(reply)
-    intercepted = state.wrapup_started
-    marker = (
-        "[green]✓ harness intercepted[/green]"
-        if intercepted
-        else "[green]✓ no goodbye attempted[/green]"
-    )
+
+    if state.wrapup_started:
+        intercepted_count += 1
+        marker = "[green]✓ harness intercepted[/green]"
+    else:
+        marker = "[green]✓ no goodbye attempted[/green]"
     agent_b_table.add_row(str(i + 1), marker, reply)
 console.print(agent_b_table)
 
 b_failures = sum(
     1 for r in agent_b_replies if detect_closure_attempt(r) and not asks_anything_else(r)
 )
-color = "green" if b_failures == 0 else "yellow"
-console.print(f"\n[{color}]Premature goodbyes: {b_failures}/5 = {b_failures * 20}%[/{color}]")
 
 # %% [markdown]
-# ### What just happened
-#
-# Same model. Same system prompt. The only difference is that Agent B's
-# harness checks every LLM output for closure intent. If it finds one
-# before the wrap-up has run, it asks the LLM to try again with stronger
-# guidance.
-#
-# **Premature goodbye rate: typically 0/5.**
-
-# %% [markdown]
-# ## Step 4 — Synthesize both endings so we can hear the difference
-
+# ### Listen to the difference
 
 # %%
-def synthesize_with_rime(text: str, output_path: Path) -> None:
-    response = requests.post(
-        "https://users.rime.ai/v1/rime-tts",
-        headers={
-            "Authorization": f"Bearer {RIME_API_KEY}",
-            "Accept": "audio/wav",
-            "Content-Type": "application/json",
-        },
-        json={"speaker": "abbie", "text": text, "modelId": "mistv2", "samplingRate": 16000},
-        timeout=15,
-    )
-    response.raise_for_status()
-    output_path.write_bytes(response.content)
+section("Listen — same model, different harness")
 
-
+# Pick the most-illustrative example from each: a goodbye if Agent A
+# produced one (the failure case), an "asks more" otherwise.
 sample_a = next(
     (r for r in agent_a_replies if detect_closure_attempt(r)),
     agent_a_replies[0],
@@ -327,44 +339,73 @@ sample_b = next(
     agent_b_replies[0],
 )
 
-console.print("\n[bold]🎤 Synthesizing example outputs with Rime[/bold]\n")
-console.print(f"  [magenta]Agent A example:[/magenta] {sample_a!r}")
-synthesize_with_rime(sample_a, AUDIO_DIR / "04_agent_a_premature_goodbye.wav")
-console.print("  [green]→[/green] audio_output/04_agent_a_premature_goodbye.wav\n")
+audio_a = AUDIO_DIR / "04_agent_a.mp3"
+audio_b = AUDIO_DIR / "04_agent_b.mp3"
 
-console.print(f"  [magenta]Agent B example:[/magenta] {sample_b!r}")
-synthesize_with_rime(sample_b, AUDIO_DIR / "04_agent_b_progressive_control.wav")
-console.print("  [green]→[/green] audio_output/04_agent_b_progressive_control.wav\n")
+with live_status("Synthesizing both endings with Rime"):
+    synthesize(sample_a, audio_a, audio_format="mp3")
+    synthesize(sample_b, audio_b, audio_format="mp3")
 
-console.print("[italic]Listen to both. The difference is not the model. It's the harness.[/italic]")
+console.print()
+console.print(f"  [bold magenta]🤖 Agent A:[/bold magenta] [yellow]{sample_a!r}[/yellow]")
+play(audio_a, label="Listen to Agent A")
+pause_for_effect(0.5)
 
-# %% [markdown]
-# ## Why progressive control matters in regulated industries
-#
-# In banking, healthcare, telco, insurance — anywhere a call has compliance
-# requirements — the things that *must* happen before a call can end are
-# not negotiable. Recording notices. Disclosures. Case ID confirmations.
-#
-# A pure agentic architecture handles these the way it handles everything:
-# soft instructions in the prompt, hope for the best. Progressive control
-# inverts this. Compliance steps are deterministic. The flexibility is
-# preserved everywhere it doesn't matter. The control is added everywhere
-# it does.
+console.print()
+console.print(f"  [bold magenta]🤖 Agent B:[/bold magenta] [yellow]{sample_b!r}[/yellow]")
+play(audio_b, label="Listen to Agent B")
+pause_for_effect(0.5)
+
+narrate(
+    "[italic]Same model. Same prompt. Same temperature. The difference is the harness.[/italic]",
+)
 
 # %% [markdown]
-# ## Recap
-#
-# - ✅ Pure agentic voice agents will say goodbye too soon some
-#   percentage of the time, regardless of model or prompt.
-# - ✅ Soft instructions work most of the time and fail in exactly the
-#   conditions that matter — long calls, satisfied users, polite
-#   acknowledgements.
-# - ✅ **Progressive control** is the architectural fix. Agentic by
-#   default, deterministic guardrails at the seams that matter.
-#
-# ## End of the four-script series
-#
-# - `01_turn_taking.py` — ASR endpoints aren't semantic boundaries.
-# - `02_backchannels_vs_interrupts.py` — same syllable, different meanings.
-# - `03_split_state.py` — concurrent systems need cooperative cancellation.
-# - `04_premature_goodbye.py` — pure agentic isn't enough; progressive control is.
+# ### Punchline
+
+# %%
+if intercepted_count > 0:
+    punchline(
+        f"Agent A premature goodbye rate: {failures}/{NUM_RUNS} ({fail_pct}%)\n"
+        f"Agent B premature goodbye rate: {b_failures}/{NUM_RUNS} "
+        f"(harness intercepted {intercepted_count} attempts)\n"
+        f"The fix isn't a smarter model. It's deterministic seams.",
+        kind="win",
+    )
+elif failures == 0:
+    punchline(
+        f"Both agents went 0/{NUM_RUNS} on premature goodbyes this run.\n"
+        f"Agent A's behavior is intermittent — try `make script-04` a few "
+        f"times to see the failure rate. The point of progressive control "
+        f"is that you don't have to hope: the harness rules out the failure "
+        f"mode entirely.",
+        kind="info",
+    )
+else:
+    punchline(
+        f"Agent A: {failures}/{NUM_RUNS} premature goodbyes\n"
+        f"Agent B: {b_failures}/{NUM_RUNS} premature goodbyes\n"
+        f"The harness ruled the failure mode out at the seam where it matters.",
+        kind="win",
+    )
+
+# %% [markdown]
+# ## The takeaway
+
+# %%
+section("Takeaway")
+console.print(
+    "  [bold]Don't take freedom away everywhere.[/bold]\n"
+    "  [bold cyan]Take it away where it matters.[/bold cyan]\n"
+)
+console.print(
+    "  [dim]Agentic by default. Deterministic at the seams.[/dim]\n"
+    "  [dim]Recording disclosures. Wrap-up flows. Compliance moments.[/dim]\n"
+    "  [dim]The framework owns the intent; the LLM owns the phrasing.[/dim]\n"
+)
+
+console.print()
+console.print(
+    "[bold magenta]Done.[/bold magenta]  [dim]Course companion: rasa.com/why-agents-fail[/dim]"
+)
+console.print()

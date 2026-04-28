@@ -4,7 +4,7 @@
 
 Four runnable Python scripts demonstrating the four most common failure modes of production voice agents in 2026 — and the architectural fix for each.
 
-Every script uses **real Deepgram ASR**, **real Rime TTS**, and **real Nebius inference**. They run end-to-end on your machine in under a minute each.
+Every script uses **real Deepgram ASR**, **real Rime TTS**, and **real Nebius inference**. They run end-to-end on your machine in under a minute each, and **play the synthesized audio through your speakers** so you actually hear each failure happen.
 
 ---
 
@@ -87,15 +87,29 @@ This runs a full pre-flight: Python version, `.env` presence, API-key validity, 
 Nebius Token Factory is an OpenAI-compatible inference platform that hosts open-source models — Llama, Qwen, MiniMax, DeepSeek, Gemma — at production-grade latency. We use it because:
 
 - The OpenAI Python SDK works unchanged; we just point `base_url` at Nebius
-- The `-fast` model variants give us sub-second inference, which is what voice latency requires
+- The fast model variants give us sub-second inference, which is what voice latency requires
 - Free credits cover the entire script series many times over
 
 The default model is `meta-llama/Meta-Llama-3.1-8B-Instruct`, which is plenty for the small classifier work the scripts do. To try something heavier (e.g. for the agent loop in scripts 3 and 4), set `NEBIUS_MODEL` in your `.env`:
 
 ```bash
-# Try a richer model with native tool-calling
-NEBIUS_MODEL=Qwen/Qwen3-30B-A3B-fast
+# Try a richer model
+NEBIUS_MODEL=Qwen/Qwen3-30B-A3B
 ```
+
+---
+
+## Audio playback
+
+Each script **plays its synthesized audio live** through your speakers — that's the point of a voice demo. To make this work, you need a system audio player:
+
+| Platform | What you need | How to install |
+|----------|---------------|----------------|
+| macOS | `afplay` | Already installed |
+| Linux | `mpg123` (or `ffplay`, `paplay`, `aplay`) | `apt install mpg123` |
+| Windows | Default shell `start` | Already installed |
+
+`make verify` checks for an installed player and warns if none is found. You can disable playback entirely (CI, headless) by setting `PLAY_AUDIO=false` in `.env`.
 
 ---
 

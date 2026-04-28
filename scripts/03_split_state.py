@@ -15,24 +15,10 @@
 #
 # > User says "stop". Three components see it. They disagree about what to do.
 #
-# Voice agents are concurrent systems. While the agent is "thinking" — running
-# tool calls, generating responses, calling models — the user can speak. Audio
-# can play. State changes. If your dialogue framework was designed for chat
-# (where the user hits send and waits), this concurrency will surface as a
-# specific failure: the agent finishes work the user already canceled, and
-# replies to a question that's now stale.
-#
-# **What you'll see:**
-#
-# 1. We build a tiny voice agent with three concurrent components: ASR (mock,
-#    fed by **Deepgram**-style transcripts), agent loop (real LLM call), and
-#    TTS (real **Rime** synthesis).
-# 2. We simulate a user barge-in mid-tool-call.
-# 3. We run two versions: one without cancellation (the failure), one with
-#    cooperative cancellation (the fix).
-# 4. We measure: time-to-stale-reply, audio-leakage, user-experienced latency.
-#
-# **Total runtime:** ~30 seconds. **Cost:** ~$0.005.
+# Voice agents are concurrent systems. While the agent is "thinking", the
+# user can speak. State changes. If your dialogue framework was designed
+# for chat (where the user hits send and waits), this concurrency surfaces
+# as a failure: the agent finishes work the user already cancelled.
 #
 # Run from the repo root:
 #
@@ -48,8 +34,6 @@ import time
 from dataclasses import dataclass, field
 from pathlib import Path
 
-import requests
-from rich.panel import Panel
 from rich.table import Table
 
 from scripts._utils import (
@@ -57,26 +41,47 @@ from scripts._utils import (
     console,
     ensure_audio_dir,
     get_key,
+    header,
+    live_status,
     make_llm_client,
+    narrate,
+    pause_for_effect,
+    play,
+    punchline,
+    section,
+    step,
+    synthesize,
 )
 
 # %% [markdown]
 # ## Setup
 
 # %%
-RIME_API_KEY = get_key("RIME_API_KEY")
-NEBIUS_API_KEY = get_key("NEBIUS_API_KEY")
+get_key("RIME_API_KEY")
+get_key("NEBIUS_API_KEY")
 AUDIO_DIR = ensure_audio_dir()
 
-console.print(Panel.fit("[bold cyan]Failure 03 — The system disagrees with itself[/bold cyan]"))
+header(
+    "Failure 03 — The system disagrees with itself",
+    "A voice agent is at least 3 concurrent components. When the user barges in, "
+    "who knows about it?",
+)
 
-# %% [markdown]
-# ## Step 1 — The cancellation primitive
+narrate(
+    "I'm going to barge in on a voice agent mid-tool-call. Twice. First with "
+    "no cancellation wired up — you'll hear the stale reply. Second with "
+    "cooperative cancellation — you'll hear the agent stop cleanly.",
+    style="italic dim",
+)
 
-# %%
 llm_client = make_llm_client()
 
 
+# %% [markdown]
+# ## The cancellation primitive
+
+
+# %%
 @dataclass
 class CancellationToken:
     """Cooperative cancellation primitive.
@@ -111,13 +116,7 @@ class AgentEvent:
 
 
 # %% [markdown]
-# ## Step 2 — The agent loop with optional cancellation
-#
-# Real production agent loops do roughly this on every turn: receive a
-# transcript, optionally call a tool, call an LLM, generate a spoken response,
-# send it to TTS. Each is a place where, if the user has just barged in, we
-# want to stop. The `token.check()` calls are the cooperative cancellation
-# pattern.
+# ## The agent loop with optional cancellation
 
 
 # %%
@@ -147,8 +146,8 @@ async def llm_response(
 ) -> str:
     """Call the LLM with the tool result and generate a spoken response.
 
-    Real LLM calls cannot be cancelled mid-request, so this is a check-before,
-    check-after pattern.
+    Real LLM calls cannot be cancelled mid-request. Pattern: check before,
+    check after.
     """
     if token:
         token.check()
@@ -173,35 +172,18 @@ async def llm_response(
     return reply
 
 
-def synthesize_with_rime_sync(text: str, output_path: Path) -> float:
-    """Synthesize TTS audio with Rime. Returns time taken."""
-    t0 = time.time()
-    response = requests.post(
-        "https://users.rime.ai/v1/rime-tts",
-        headers={
-            "Authorization": f"Bearer {RIME_API_KEY}",
-            "Accept": "audio/wav",
-            "Content-Type": "application/json",
-        },
-        json={
-            "speaker": "abbie",
-            "text": text,
-            "modelId": "mistv2",
-            "samplingRate": 16000,
-        },
-        timeout=15,
-    )
-    response.raise_for_status()
-    output_path.write_bytes(response.content)
-    return time.time() - t0
+def synthesize_reply_sync(text: str, output_path: Path) -> None:
+    """TTS via Rime, blocking — wrapped by run_in_executor in the agent loop."""
+    synthesize(text, output_path, audio_format="mp3")
 
 
 async def agent_turn(
     transcript: str,
     token: CancellationToken | None,
     events: list[AgentEvent],
+    audio_out: Path,
 ) -> str | None:
-    """One full agent turn: tool call, LLM response, TTS. Returns reply or None."""
+    """One full agent turn: tool call, LLM, TTS. Returns reply or None."""
     try:
         tool_result = await mock_tool_call("lookup_account", 1.5, token, events)
         reply_text = await llm_response(transcript, tool_result, token, events)
@@ -209,14 +191,13 @@ async def agent_turn(
         if token:
             token.check()
         events.append(AgentEvent("agent", "tts_start", reply_text[:30]))
-        audio_path = AUDIO_DIR / f"03_agent_reply_{int(time.time() * 1000)}.wav"
 
         loop = asyncio.get_event_loop()
-        await loop.run_in_executor(None, synthesize_with_rime_sync, reply_text, audio_path)
+        await loop.run_in_executor(None, synthesize_reply_sync, reply_text, audio_out)
 
         if token:
             token.check()
-        events.append(AgentEvent("agent", "tts_end", str(audio_path)))
+        events.append(AgentEvent("agent", "tts_end", str(audio_out.name)))
         events.append(AgentEvent("agent", "reply_sent", reply_text))
         return reply_text
 
@@ -225,15 +206,6 @@ async def agent_turn(
         return None
 
 
-# %% [markdown]
-# ## Step 3 — The user's barge-in
-#
-# We simulate a user saying "stop" 800ms into the agent's turn. In a real
-# system this would come from Deepgram's streaming transcription firing a
-# `NewTranscript` event mid-bot-speech.
-
-
-# %%
 async def simulate_user_bargein(
     token: CancellationToken | None,
     events: list[AgentEvent],
@@ -255,117 +227,126 @@ def render_events(events: list[AgentEvent], title: str) -> None:
         return
     start_t = events[0].t
     table = Table(title=title, show_header=True)
-    table.add_column("t", justify="right", style="dim")
-    table.add_column("Component", style="cyan")
-    table.add_column("Event")
+    table.add_column("t", justify="right", style="dim", width=6)
+    table.add_column("Component", style="cyan", width=10)
+    table.add_column("Event", style="white")
     table.add_column("Detail", style="yellow")
     for e in events:
         rel_t = e.t - start_t
-        table.add_row(f"{rel_t:5.2f}s", e.component, e.event, e.detail)
+        table.add_row(f"{rel_t:.2f}s", e.component, e.event, e.detail)
     console.print(table)
 
 
 # %% [markdown]
-# ## Step 4 — The failure: agent runs to completion despite barge-in
-
+# ## Scenario 1 — No cancellation (the failure)
 
 # %%
+section("Scenario 1 — No cancellation (the failure)")
+
+step(1, "User says 'What's my balance?' — agent starts working")
+narrate(
+    "The agent kicks off a 1.5s tool call. 800ms in, the user says 'stop'. "
+    "There's no cancellation wired up. Watch what happens.",
+)
+
+failure_audio = AUDIO_DIR / "03_stale_reply.mp3"
+
+
 async def run_failure_demo() -> list[AgentEvent]:
     events = [AgentEvent("system", "scenario", "FAILURE: no cancellation")]
     transcript = "What's my account balance?"
     events.append(AgentEvent("user", "transcript_committed", transcript))
 
-    agent_task = asyncio.create_task(agent_turn(transcript, None, events))
+    agent_task = asyncio.create_task(agent_turn(transcript, None, events, failure_audio))
     bargein_task = asyncio.create_task(simulate_user_bargein(None, events))
-
     await asyncio.gather(agent_task, bargein_task)
     return events
 
 
-console.print("\n[bold red]🚨 SCENARIO 1: No cancellation (the failure)[/bold red]\n")
-failure_events = asyncio.run(run_failure_demo())
+with live_status("Running scenario 1 — agent has no token to check"):
+    failure_events = asyncio.run(run_failure_demo())
+
 render_events(failure_events, "Without cancellation")
 
 bargein_t = next((e.t for e in failure_events if e.event == "barge_in_detected"), None)
 reply_t = next((e.t for e in failure_events if e.event == "reply_sent"), None)
 if bargein_t and reply_t:
     stale_delay = reply_t - bargein_t
-    console.print(f"\n[red]⚠ Time from barge-in to stale reply: {stale_delay:.2f}s[/red]")
-    console.print(
-        f"  The agent kept working for [bold]{stale_delay:.2f}s[/bold] after the user "
-        f"said 'stop' and then played a reply to a question they'd moved on from."
+    console.print()
+    if failure_audio.exists():
+        play(
+            failure_audio,
+            label=f"Listen — the reply that played {stale_delay:.1f}s after 'stop'",
+        )
+    punchline(
+        f"User said 'stop' at 0.8s. Agent replied at {(reply_t - failure_events[0].t):.2f}s.\n"
+        f"That's {stale_delay:.1f} seconds of 'is this thing broken?'\n"
+        f"In production this is the moment users hang up.",
+        kind="fail",
     )
 
-# %% [markdown]
-# ### What just happened
-#
-# The user said "stop" at ~0.8s. The barge-in was detected by the channel —
-# but there was no cancellation mechanism wired into the agent. The agent
-# completed its 1.5-second tool call, called the LLM, called Rime for TTS,
-# and produced an audio reply. **Total stale-reply delay: ~1.5-2.5 seconds
-# of confusion.**
+pause_for_effect(0.8)
 
 # %% [markdown]
-# ## Step 5 — The fix: cooperative cancellation
-
+# ## Scenario 2 — Cooperative cancellation (the fix)
 
 # %%
+section("Scenario 2 — Cooperative cancellation (the fix)")
+
+narrate(
+    "Same agent, same tools, same LLM. The only thing that changes: every "
+    "long-running operation now accepts a cancellation token and checks it "
+    "between steps. When the user barges in, the channel flips the flag.",
+)
+
+fix_audio = AUDIO_DIR / "03_clean_exit.mp3"
+
+
 async def run_fix_demo() -> list[AgentEvent]:
     events = [AgentEvent("system", "scenario", "FIX: cooperative cancellation")]
     transcript = "What's my account balance?"
     events.append(AgentEvent("user", "transcript_committed", transcript))
 
     token = CancellationToken()
-    agent_task = asyncio.create_task(agent_turn(transcript, token, events))
+    agent_task = asyncio.create_task(agent_turn(transcript, token, events, fix_audio))
     bargein_task = asyncio.create_task(simulate_user_bargein(token, events))
-
     await asyncio.gather(agent_task, bargein_task)
     return events
 
 
-console.print("\n\n[bold green]✅ SCENARIO 2: Cooperative cancellation (the fix)[/bold green]\n")
-fix_events = asyncio.run(run_fix_demo())
+with live_status("Running scenario 2 — token wired through"):
+    fix_events = asyncio.run(run_fix_demo())
+
 render_events(fix_events, "With cooperative cancellation")
 
 bargein_t = next((e.t for e in fix_events if e.event == "barge_in_detected"), None)
 cancelled_t = next((e.t for e in fix_events if e.event == "cancelled"), None)
 if bargein_t and cancelled_t:
     response_delay = cancelled_t - bargein_t
-    console.print(
-        f"\n[green]✓ Time from barge-in to clean exit: {response_delay * 1000:.0f}ms[/green]"
+    punchline(
+        f"User said 'stop' at 0.8s. Agent stopped at {(cancelled_t - fix_events[0].t):.2f}s.\n"
+        f"That's {response_delay * 1000:.0f}ms to a clean exit.\n"
+        f"No stale audio. No wasted LLM call. No 'is this thing broken'.",
+        kind="win",
     )
-    console.print("  The agent stopped cleanly. No stale audio. No wasted LLM call.")
 
 # %% [markdown]
-# ## The architectural lesson
-#
-# What just changed wasn't the model. It wasn't the ASR. It wasn't the TTS.
-# What changed is that **the agent loop knows how to be told to stop**.
-#
-# The pattern:
-#
-# 1. **Every long-running operation accepts a cancellation token.** Tool
-#    calls, LLM calls, TTS synthesis. They check the token at well-defined
-#    points.
-# 2. **One canonical place owns the token.** When the channel detects a
-#    barge-in, it flips the flag. Everything downstream sees it on the
-#    next check.
-# 3. **Cancellation is cooperative, not violent.** We don't kill threads
-#    or yank HTTP requests. We let in-flight work complete to a clean state
-#    and prevent new work from starting.
-#
-# Same pattern as `asyncio.CancelledError`, Go contexts, OS signals.
-# **Voice agents are concurrent systems and need to be designed as such.**
+# ## The takeaway
 
-# %% [markdown]
-# ## Recap
-#
-# - ✅ Voice agents are **concurrent systems**. Things happen during the
-#   agent's "turn" — interrupts, pauses, network jitter.
-# - ✅ Without cooperative cancellation, the agent finishes work the user
-#   already canceled and replies to a stale question.
-# - ✅ The fix is a **cancellation token** that every long-running
-#   operation checks between steps.
-#
-# **Next:** `04_premature_goodbye.py` — when the LLM has freedom over the
-# words and decides the call is over while the user is still thinking.
+# %%
+section("Takeaway")
+console.print(
+    "  [bold]Voice agents are concurrent systems, not turn-based ones.[/bold]\n"
+    "  [bold cyan]Every long-running operation needs to be cancellable.[/bold cyan]\n"
+)
+console.print(
+    "  [dim]Same pattern as `asyncio.CancelledError`, Go contexts, OS signals.[/dim]\n"
+    "  [dim]If your dialogue framework was designed for chat, this is a retrofit.[/dim]\n"
+    "  [dim]Three components, one canonical token, no stale replies.[/dim]\n"
+)
+
+console.print()
+console.print(
+    "[bold magenta]Next:[/bold magenta]  make script-04   [dim]— The bot says goodbye too soon[/dim]"
+)
+console.print()

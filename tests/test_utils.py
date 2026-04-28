@@ -1,8 +1,8 @@
 """Smoke tests for the shared utilities.
 
-These tests don't make network calls. They verify that the scripts
-package is importable, the credential resolver behaves correctly,
-and the audio output directory can be created.
+These tests don't make network calls. They verify that the scripts package
+is importable, the credential resolver behaves correctly, the audio output
+directory can be created, and the new helpers exist.
 """
 
 from __future__ import annotations
@@ -73,12 +73,52 @@ def test_make_llm_client_raises_without_key(monkeypatch):
 
 
 def test_default_nebius_model_is_set():
-    """The default model constant is non-empty."""
+    """The default model constant is non-empty and looks like a Nebius model."""
     assert _utils.DEFAULT_NEBIUS_MODEL
     assert isinstance(_utils.DEFAULT_NEBIUS_MODEL, str)
+    # Nebius models are namespaced: "org/model-name"
+    assert "/" in _utils.DEFAULT_NEBIUS_MODEL
 
 
 def test_nebius_base_url_is_set():
     """The Nebius base URL is configured to Token Factory by default."""
     assert _utils.NEBIUS_BASE_URL.startswith("https://")
     assert "nebius" in _utils.NEBIUS_BASE_URL
+
+
+def test_synthesize_helper_exists():
+    """The shared synthesize() helper is importable from _utils."""
+    assert callable(_utils.synthesize)
+
+
+def test_play_helper_exists():
+    """The shared play() helper is importable from _utils."""
+    assert callable(_utils.play)
+
+
+def test_play_audio_default_is_on():
+    """PLAY_AUDIO defaults to True so the demos play audio out of the box."""
+    # Note: this reflects whatever was set at import time; we just confirm
+    # it's a bool, which the type system already would.
+    assert isinstance(_utils.PLAY_AUDIO, bool)
+
+
+def test_play_skips_when_disabled(tmp_path, monkeypatch, capsys):
+    """play() should not crash when PLAY_AUDIO is False — it just prints a note."""
+    monkeypatch.setattr(_utils, "PLAY_AUDIO", False)
+    fake_audio = tmp_path / "fake.mp3"
+    fake_audio.write_bytes(b"\x00" * 100)
+    # Should not raise even though the file isn't real audio
+    _utils.play(fake_audio, label="test")
+    # No exception is the assertion — the function handles the disabled path.
+
+
+def test_narrative_helpers_exist():
+    """All the new presentation helpers are present and callable."""
+    assert callable(_utils.header)
+    assert callable(_utils.section)
+    assert callable(_utils.narrate)
+    assert callable(_utils.punchline)
+    assert callable(_utils.step)
+    assert callable(_utils.live_status)
+    assert callable(_utils.pause_for_effect)

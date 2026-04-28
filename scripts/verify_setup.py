@@ -10,6 +10,7 @@ Verified:
   - Required environment variables (DEEPGRAM_API_KEY, RIME_API_KEY, NEBIUS_API_KEY)
   - Python dependencies (deepgram-sdk, openai, requests, rich, python-dotenv)
   - Package layout (scripts/ is importable)
+  - Audio playback (system player installed for live audio)
   - External service connectivity (Deepgram, Rime, Nebius — real round-trips)
 
 Usage::
@@ -131,6 +132,33 @@ def check_module(module: str, label: str) -> bool:
     return False
 
 
+def check_audio_player() -> bool:
+    """Verify a system audio player is installed (for live audio playback)."""
+    import platform
+    import shutil
+
+    system = platform.system()
+    if system == "Darwin":
+        if shutil.which("afplay"):
+            ok("Audio player: afplay  [dim](macOS built-in)[/dim]")
+            return True
+        fail("No audio player found (expected `afplay` on macOS)")
+        return False
+    if system == "Linux":
+        for cmd in ("mpg123", "ffplay", "play", "paplay", "aplay"):
+            if shutil.which(cmd):
+                ok(f"Audio player: {cmd}")
+                return True
+        warn("No audio player found on PATH")
+        hint("Install one: apt install mpg123  (or ffmpeg, sox, alsa-utils)")
+        return False
+    if system == "Windows":
+        ok("Audio playback: Windows shell (start)")
+        return True
+    warn(f"Unknown platform '{system}' — playback may not work")
+    return False
+
+
 def check_scripts_package() -> bool:
     """Verify the local scripts package layout is intact."""
     needed = [
@@ -196,6 +224,11 @@ def run_checks() -> int:
     section("Package layout")
     if not check_scripts_package():
         errors += 1
+
+    # ── Audio playback ────────────────────────────────────────────────────────
+    section("Audio playback")
+    if not check_audio_player():
+        warnings += 1  # not fatal — set PLAY_AUDIO=false to skip playback
 
     # ── External services ────────────────────────────────────────────────────
     # Only run the network round-trips if the keys passed presence checks.
