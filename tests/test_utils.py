@@ -118,7 +118,18 @@ def test_narrative_helpers_exist():
     assert callable(_utils.header)
     assert callable(_utils.section)
     assert callable(_utils.narrate)
-    assert callable(_utils.punchline)
     assert callable(_utils.step)
     assert callable(_utils.live_status)
     assert callable(_utils.pause_for_effect)
+
+
+def test_projector_helpers_exist():
+    """The projector-friendly helpers from the v3 rewrite are all present."""
+    assert callable(_utils.watch_this)
+    assert callable(_utils.verdict)
+    assert callable(_utils.big_compare)
+
+
+def test_synthesize_with_pause_helper_exists():
+    """The pause-injection helper for Failure 01 is importable."""
+    assert callable(_utils.synthesize_with_pause)

@@ -15,16 +15,7 @@
 #
 # > User says "stop". Three components see it. They disagree about what to do.
 #
-# Voice agents are concurrent systems. While the agent is "thinking", the
-# user can speak. State changes. If your dialogue framework was designed
-# for chat (where the user hits send and waits), this concurrency surfaces
-# as a failure: the agent finishes work the user already cancelled.
-#
-# Run from the repo root:
-#
-# ```bash
-# make script-03
-# ```
+# Run from the repo root: `make script-03`
 
 # %%
 from __future__ import annotations
@@ -34,10 +25,9 @@ import time
 from dataclasses import dataclass, field
 from pathlib import Path
 
-from rich.table import Table
-
 from scripts._utils import (
     DEFAULT_NEBIUS_MODEL,
+    big_compare,
     console,
     ensure_audio_dir,
     get_key,
@@ -47,10 +37,10 @@ from scripts._utils import (
     narrate,
     pause_for_effect,
     play,
-    punchline,
     section,
-    step,
     synthesize,
+    verdict,
+    watch_this,
 )
 
 # %% [markdown]
@@ -63,22 +53,31 @@ AUDIO_DIR = ensure_audio_dir()
 
 header(
     "Failure 03 — The system disagrees with itself",
-    "A voice agent is at least 3 concurrent components. When the user barges in, "
-    "who knows about it?",
+    "A voice agent is at least 3 concurrent components. "
+    "When the user barges in, who knows about it?",
 )
 
-narrate(
-    "I'm going to barge in on a voice agent mid-tool-call. Twice. First with "
-    "no cancellation wired up — you'll hear the stale reply. Second with "
-    "cooperative cancellation — you'll hear the agent stop cleanly.",
-    style="italic dim",
+# %% [markdown]
+# ## What we're about to do
+
+# %%
+watch_this(
+    "I'll start an agent on a 1.5-second tool call.\n"
+    "800ms in, the user will say 'STOP'. You'll hear it.\n"
+    "Twice:\n"
+    "  - First with NO cancellation wired up — agent ignores the user, plays a stale reply.\n"
+    "  - Then WITH cooperative cancellation — agent stops cleanly in 100ms.",
 )
 
-llm_client = make_llm_client()
+# Pre-synthesize the user's "stop" once. We'll play it twice — once per scenario.
+USER_STOP_AUDIO = AUDIO_DIR / "03_user_stop.mp3"
+if not USER_STOP_AUDIO.exists():
+    with live_status("Synthesizing the user's 'stop' utterance"):
+        synthesize("Stop. Wait.", USER_STOP_AUDIO, audio_format="mp3", speed_alpha=1.1)
 
 
 # %% [markdown]
-# ## The cancellation primitive
+# ## Cancellation primitive
 
 
 # %%
@@ -86,10 +85,9 @@ llm_client = make_llm_client()
 class CancellationToken:
     """Cooperative cancellation primitive.
 
-    The agent loop checks `cancelled` between every step. When the channel
-    detects a barge-in, it flips the flag. In-flight work that hasn't yet
-    reached a check point will complete (we can't kill an HTTP request
-    mid-flight), but no new work starts.
+    Every long-running operation in the agent loop checks the token
+    between steps. When the channel detects a barge-in, it flips the
+    flag. New work doesn't start; in-flight work exits at the next check.
     """
 
     cancelled: bool = False
@@ -107,7 +105,7 @@ class CancellationToken:
 
 @dataclass
 class AgentEvent:
-    """Anything that happens in the agent loop, with a timestamp."""
+    """One thing that happened in the agent loop, with a timestamp."""
 
     component: str
     event: str
@@ -116,17 +114,19 @@ class AgentEvent:
 
 
 # %% [markdown]
-# ## The agent loop with optional cancellation
-
+# ## The agent loop
 
 # %%
+llm_client = make_llm_client()
+
+
 async def mock_tool_call(
     name: str,
     duration: float,
     token: CancellationToken | None,
     events: list[AgentEvent],
 ) -> str:
-    """Simulate a slow tool call. Sleeps in increments and checks the token."""
+    """Simulate a slow tool call (e.g. account lookup). Sleeps in increments."""
     events.append(AgentEvent("agent", "tool_call_start", name))
     steps = 10
     step_duration = duration / steps
@@ -144,11 +144,7 @@ async def llm_response(
     token: CancellationToken | None,
     events: list[AgentEvent],
 ) -> str:
-    """Call the LLM with the tool result and generate a spoken response.
-
-    Real LLM calls cannot be cancelled mid-request. Pattern: check before,
-    check after.
-    """
+    """Generate a spoken response. LLM calls aren't cancellable mid-request."""
     if token:
         token.check()
     events.append(AgentEvent("agent", "llm_call_start", transcript[:30]))
@@ -173,7 +169,7 @@ async def llm_response(
 
 
 def synthesize_reply_sync(text: str, output_path: Path) -> None:
-    """TTS via Rime, blocking — wrapped by run_in_executor in the agent loop."""
+    """TTS via Rime, blocking — wrapped by run_in_executor."""
     synthesize(text, output_path, audio_format="mp3")
 
 
@@ -183,7 +179,7 @@ async def agent_turn(
     events: list[AgentEvent],
     audio_out: Path,
 ) -> str | None:
-    """One full agent turn: tool call, LLM, TTS. Returns reply or None."""
+    """One full agent turn: tool call → LLM → TTS. Returns reply or None."""
     try:
         tool_result = await mock_tool_call("lookup_account", 1.5, token, events)
         reply_text = await llm_response(transcript, tool_result, token, events)
@@ -211,43 +207,29 @@ async def simulate_user_bargein(
     events: list[AgentEvent],
     delay: float = 0.8,
 ) -> None:
-    """User says 'stop' after `delay` seconds."""
+    """User says 'stop' after `delay` seconds. We PLAY the audio so the audience hears it."""
     await asyncio.sleep(delay)
-    events.append(AgentEvent("channel", "barge_in_detected", "user said: stop"))
+    events.append(AgentEvent("user", "barge_in", "user said: stop"))
+
+    # Play the user's "stop" out loud, non-blocking — concurrently with the
+    # agent's tool call so the audience hears the timing.
+    play(USER_STOP_AUDIO, label="(user barges in)", blocking=False)
+
     if token:
-        events.append(AgentEvent("channel", "cancellation_signaled", ""))
+        events.append(AgentEvent("channel", "cancel_signaled", ""))
         token.cancel()
-    else:
-        events.append(AgentEvent("channel", "cancellation_NOT_signaled", "no token wired up"))
-
-
-def render_events(events: list[AgentEvent], title: str) -> None:
-    """Pretty-print the event log as a Rich table."""
-    if not events:
-        return
-    start_t = events[0].t
-    table = Table(title=title, show_header=True)
-    table.add_column("t", justify="right", style="dim", width=6)
-    table.add_column("Component", style="cyan", width=10)
-    table.add_column("Event", style="white")
-    table.add_column("Detail", style="yellow")
-    for e in events:
-        rel_t = e.t - start_t
-        table.add_row(f"{rel_t:.2f}s", e.component, e.event, e.detail)
-    console.print(table)
 
 
 # %% [markdown]
 # ## Scenario 1 — No cancellation (the failure)
 
 # %%
-section("Scenario 1 — No cancellation (the failure)")
-
-step(1, "User says 'What's my balance?' — agent starts working")
+section("Scenario 1 — No cancellation wired up")
 narrate(
-    "The agent kicks off a 1.5s tool call. 800ms in, the user says 'stop'. "
-    "There's no cancellation wired up. Watch what happens.",
+    "Watch the timeline. User says 'stop' at 0.8s. The agent has no idea — "
+    "it keeps running. Tool finishes. LLM runs. TTS runs. THEN the reply plays."
 )
+console.print()
 
 failure_audio = AUDIO_DIR / "03_stale_reply.mp3"
 
@@ -256,7 +238,6 @@ async def run_failure_demo() -> list[AgentEvent]:
     events = [AgentEvent("system", "scenario", "FAILURE: no cancellation")]
     transcript = "What's my account balance?"
     events.append(AgentEvent("user", "transcript_committed", transcript))
-
     agent_task = asyncio.create_task(agent_turn(transcript, None, events, failure_audio))
     bargein_task = asyncio.create_task(simulate_user_bargein(None, events))
     await asyncio.gather(agent_task, bargein_task)
@@ -266,49 +247,61 @@ async def run_failure_demo() -> list[AgentEvent]:
 with live_status("Running scenario 1 — agent has no token to check"):
     failure_events = asyncio.run(run_failure_demo())
 
-render_events(failure_events, "Without cancellation")
-
-bargein_t = next((e.t for e in failure_events if e.event == "barge_in_detected"), None)
-reply_t = next((e.t for e in failure_events if e.event == "reply_sent"), None)
-if bargein_t and reply_t:
-    stale_delay = reply_t - bargein_t
-    console.print()
-    if failure_audio.exists():
-        play(
-            failure_audio,
-            label=f"Listen — the reply that played {stale_delay:.1f}s after 'stop'",
+# Compact event display — only the events that matter, with timing on the LEFT.
+console.print()
+start_t = failure_events[0].t
+relevant = [e for e in failure_events if e.event in {"barge_in", "tool_call_end", "reply_sent"}]
+for e in relevant:
+    rel = e.t - start_t
+    if e.event == "barge_in":
+        console.print(f"  [bold red][{rel:5.2f}s][/bold red] [bold]👤 USER:[/bold] 'stop'")
+    elif e.event == "tool_call_end":
+        console.print(
+            f"  [dim][{rel:5.2f}s] tool finished (agent didn't notice the interrupt)[/dim]"
         )
-    punchline(
-        f"User said 'stop' at 0.8s. Agent replied at {(reply_t - failure_events[0].t):.2f}s.\n"
-        f"That's {stale_delay:.1f} seconds of 'is this thing broken?'\n"
-        f"In production this is the moment users hang up.",
-        kind="fail",
-    )
+    elif e.event == "reply_sent":
+        console.print(
+            f'  [bold red][{rel:5.2f}s] 🤖 AGENT replies (STALE):[/bold red] "{e.detail}"'
+        )
 
-pause_for_effect(0.8)
+bargein_t = next((e.t for e in failure_events if e.event == "barge_in"), None)
+reply_t = next((e.t for e in failure_events if e.event == "reply_sent"), None)
+stale_delay = (reply_t - bargein_t) if (bargein_t and reply_t) else 0.0
+
+# Now play the stale reply that the user hears AFTER they said stop.
+if failure_audio.exists() and reply_t:
+    pause_for_effect(0.3)
+    play(failure_audio, label=f"Listen — stale reply, {stale_delay:.1f}s after the user said stop")
+
+verdict(
+    f"User said STOP at 0.8s. The agent kept working for {stale_delay:.1f} more seconds.",
+    "By the time the reply plays, the user has moved on. They hear it as a broken bot.\n"
+    "In production this is the moment they hang up.",
+    kind="fail",
+)
+
+pause_for_effect(0.6)
 
 # %% [markdown]
 # ## Scenario 2 — Cooperative cancellation (the fix)
 
 # %%
-section("Scenario 2 — Cooperative cancellation (the fix)")
-
+section("Scenario 2 — Same agent, but with a cancellation token")
 narrate(
-    "Same agent, same tools, same LLM. The only thing that changes: every "
-    "long-running operation now accepts a cancellation token and checks it "
-    "between steps. When the user barges in, the channel flips the flag.",
+    "One change: every long-running step now checks a cancellation token. "
+    "When the channel detects a barge-in, it flips the flag. Watch."
 )
-
-fix_audio = AUDIO_DIR / "03_clean_exit.mp3"
+console.print()
 
 
 async def run_fix_demo() -> list[AgentEvent]:
     events = [AgentEvent("system", "scenario", "FIX: cooperative cancellation")]
     transcript = "What's my account balance?"
     events.append(AgentEvent("user", "transcript_committed", transcript))
-
     token = CancellationToken()
-    agent_task = asyncio.create_task(agent_turn(transcript, token, events, fix_audio))
+    agent_task = asyncio.create_task(
+        agent_turn(transcript, token, events, AUDIO_DIR / "03_clean_exit.mp3")
+    )
     bargein_task = asyncio.create_task(simulate_user_bargein(token, events))
     await asyncio.gather(agent_task, bargein_task)
     return events
@@ -317,21 +310,41 @@ async def run_fix_demo() -> list[AgentEvent]:
 with live_status("Running scenario 2 — token wired through"):
     fix_events = asyncio.run(run_fix_demo())
 
-render_events(fix_events, "With cooperative cancellation")
+console.print()
+start_t = fix_events[0].t
+fix_relevant = [e for e in fix_events if e.event in {"barge_in", "cancel_signaled", "cancelled"}]
+for e in fix_relevant:
+    rel = e.t - start_t
+    if e.event == "barge_in":
+        console.print(f"  [bold red][{rel:5.2f}s][/bold red] [bold]👤 USER:[/bold] 'stop'")
+    elif e.event == "cancel_signaled":
+        console.print(f"  [bold green][{rel:5.2f}s] ⚡ channel signals cancellation[/bold green]")
+    elif e.event == "cancelled":
+        console.print(f"  [bold green][{rel:5.2f}s] ✓ agent stopped cleanly[/bold green]")
 
-bargein_t = next((e.t for e in fix_events if e.event == "barge_in_detected"), None)
+bargein_t2 = next((e.t for e in fix_events if e.event == "barge_in"), None)
 cancelled_t = next((e.t for e in fix_events if e.event == "cancelled"), None)
-if bargein_t and cancelled_t:
-    response_delay = cancelled_t - bargein_t
-    punchline(
-        f"User said 'stop' at 0.8s. Agent stopped at {(cancelled_t - fix_events[0].t):.2f}s.\n"
-        f"That's {response_delay * 1000:.0f}ms to a clean exit.\n"
-        f"No stale audio. No wasted LLM call. No 'is this thing broken'.",
-        kind="win",
-    )
+clean_delay = (cancelled_t - bargein_t2) if (bargein_t2 and cancelled_t) else 0.0
+
+verdict(
+    f"User said STOP at 0.8s. The agent stopped {int(clean_delay * 1000)}ms later.",
+    "No stale audio. No wasted LLM call. No wasted TTS. The user gets the floor immediately.",
+    kind="win",
+)
 
 # %% [markdown]
-# ## The takeaway
+# ## Big comparison
+
+# %%
+big_compare(
+    "Without cancellation",
+    f"{stale_delay:.1f} seconds\nof stale audio\nplaying AFTER\n'stop'",
+    "With cooperative\ncancellation",
+    f"{int(clean_delay * 1000)} ms\nto a clean exit\nNo stale audio",
+)
+
+# %% [markdown]
+# ## Takeaway
 
 # %%
 section("Takeaway")
@@ -339,14 +352,9 @@ console.print(
     "  [bold]Voice agents are concurrent systems, not turn-based ones.[/bold]\n"
     "  [bold cyan]Every long-running operation needs to be cancellable.[/bold cyan]\n"
 )
-console.print(
-    "  [dim]Same pattern as `asyncio.CancelledError`, Go contexts, OS signals.[/dim]\n"
-    "  [dim]If your dialogue framework was designed for chat, this is a retrofit.[/dim]\n"
-    "  [dim]Three components, one canonical token, no stale replies.[/dim]\n"
-)
 
 console.print()
 console.print(
-    "[bold magenta]Next:[/bold magenta]  make script-04   [dim]— The bot says goodbye too soon[/dim]"
+    "[bold magenta]Next:[/bold magenta]  [green]make script-04[/green]   [dim]— The bot says goodbye too soon[/dim]"
 )
 console.print()

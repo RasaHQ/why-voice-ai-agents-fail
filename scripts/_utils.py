@@ -9,27 +9,31 @@ Specifically:
 2. Provides a single, friendly Rich console for consistent script output.
 3. Provides a shared `make_llm_client()` factory that returns a Nebius-backed
    OpenAI client — with sensible timeouts and retries.
-4. Provides `synthesize()` and `play()` helpers so every script speaks audio
-   the same way and plays it through the host's speakers.
-5. Provides narrative helpers (`narrate()`, `pause_for_effect()`, `live_status()`)
-   so the scripts feel like a presentation, not a wall of tables.
+4. Provides `synthesize()` / `synthesize_with_pause()` / `play()` helpers so
+   every script speaks audio the same way and plays it through the speakers.
+5. Provides projector-friendly narrative helpers (`header`, `verdict`,
+   `narrate`, `live_status`) so the scripts feel like a presentation rather
+   than a wall of tables.
 6. Provides cheap "is this credential actually valid?" health checks
    that the Makefile and `verify_setup.py` call before running the scripts.
 
-Why MP3 and not WAV? Rime's WAV output from `mistv2` doesn't always carry the
-full RIFF header the way Deepgram expects, which surfaces as a 400 "corrupt
-or unsupported data" error. MP3 has well-defined sync words and Deepgram
-ingests it natively. We use MP3 throughout.
+Why MP3 for most scripts but WAV for `synthesize_with_pause()`? MP3 plays
+everywhere out of the box and Deepgram ingests it natively. But splicing
+silence into MP3 reliably requires ffmpeg, which we don't want as a hard
+dep. WAV manipulation, on the other hand, is in Python's stdlib (`wave`).
+So we use WAV when we need to manipulate audio, MP3 otherwise.
 """
 
 from __future__ import annotations
 
+import io
 import os
 import platform
 import shutil
 import subprocess
 import sys
 import time
+import wave
 from collections.abc import Iterator
 from contextlib import contextmanager
 from pathlib import Path
@@ -54,16 +58,9 @@ load_dotenv(ENV_PATH, override=False)
 NEBIUS_BASE_URL: Final[str] = os.environ.get(
     "NEBIUS_BASE_URL", "https://api.tokenfactory.nebius.com/v1/"
 )
-
-# Default model. Llama 3.1 8B Instruct is fast enough for the classifier and
-# short-reply work the four scripts do, and is currently available on Nebius
-# Token Factory. Override via NEBIUS_MODEL.
 DEFAULT_NEBIUS_MODEL: Final[str] = os.environ.get(
     "NEBIUS_MODEL", "meta-llama/Meta-Llama-3.1-8B-Instruct"
 )
-
-# Audio playback can be disabled (CI, headless, "I just want the data").
-# Default is on — this is a voice demo.
 PLAY_AUDIO: Final[bool] = os.environ.get("PLAY_AUDIO", "true").lower() != "false"
 
 # ── Console ───────────────────────────────────────────────────────────────────
@@ -72,15 +69,7 @@ console: Final[Console] = Console()
 
 # ── Credential loading ────────────────────────────────────────────────────────
 def get_key(name: str, *, required: bool = True) -> str | None:
-    """Load an API key from Colab secrets, .env, or the environment.
-
-    Tries (in order):
-      1. Google Colab `userdata.get(name)` — no-op outside Colab
-      2. `os.environ[name]` — covers .env (already loaded above) and CI
-
-    If `required=True` and nothing is found, raises RuntimeError.
-    Returns None when `required=False` and nothing is found.
-    """
+    """Load an API key from Colab secrets, .env, or the environment."""
     key: str | None = None
     try:
         from google.colab import userdata  # type: ignore[import-not-found]
@@ -108,15 +97,7 @@ def ensure_audio_dir() -> Path:
 
 # ── LLM client factory ────────────────────────────────────────────────────────
 def make_llm_client(timeout: float = 60.0, max_retries: int = 2) -> openai.OpenAI:
-    """Return an OpenAI SDK client wired up to Nebius Token Factory.
-
-    The OpenAI SDK is the client library; the `base_url` points at Nebius's
-    OpenAI-compatible endpoint.
-
-    Defaults to a 60-second timeout (Nebius `-fast` variants reply in ~1s,
-    full models in ~3-5s; 60s is enough margin for cold starts). Two retries
-    with backoff on transient errors.
-    """
+    """Return an OpenAI SDK client wired up to Nebius Token Factory."""
     api_key = get_key("NEBIUS_API_KEY")
     return openai.OpenAI(
         api_key=api_key,
@@ -127,10 +108,50 @@ def make_llm_client(timeout: float = 60.0, max_retries: int = 2) -> openai.OpenA
 
 
 # ── TTS via Rime ──────────────────────────────────────────────────────────────
-# We default to MP3 because Deepgram's auto-detection is more reliable on it,
-# and every desktop OS plays MP3 out of the box.
-
 RIME_ENDPOINT: Final[str] = "https://users.rime.ai/v1/rime-tts"
+
+
+def _rime_post(
+    text: str,
+    *,
+    audio_format: str,
+    speaker: str,
+    model_id: str,
+    speed_alpha: float,
+    sampling_rate: int = 22050,
+) -> bytes:
+    """Low-level Rime call. Returns raw audio bytes."""
+    rime_key = get_key("RIME_API_KEY")
+    accept = {"mp3": "audio/mp3", "wav": "audio/wav"}.get(audio_format, "audio/mp3")
+
+    payload = {
+        "speaker": speaker,
+        "text": text,
+        "modelId": model_id,
+        "speedAlpha": speed_alpha,
+    }
+    if audio_format == "wav":
+        payload["samplingRate"] = sampling_rate
+
+    response = requests.post(
+        RIME_ENDPOINT,
+        headers={
+            "Authorization": f"Bearer {rime_key}",
+            "Accept": accept,
+            "Content-Type": "application/json",
+        },
+        json=payload,
+        timeout=30,
+    )
+    response.raise_for_status()
+
+    content_type = response.headers.get("Content-Type", "")
+    if "json" in content_type or len(response.content) < 256:
+        raise RuntimeError(
+            f"Rime returned non-audio response (Content-Type={content_type!r}, "
+            f"size={len(response.content)} bytes): {response.text[:200]}"
+        )
+    return response.content
 
 
 def synthesize(
@@ -142,63 +163,87 @@ def synthesize(
     speed_alpha: float = 1.0,
     audio_format: str = "mp3",
 ) -> Path:
-    """Generate audio from text using Rime TTS.
-
-    Defaults to MP3 because that's what works most reliably across the
-    Rime → Deepgram → host-speaker pipeline. WAV is also supported by Rime
-    but the headers can confuse Deepgram with `mistv2`.
-
-    Returns the output path on success.
-    """
-    rime_key = get_key("RIME_API_KEY")
-    accept = {"mp3": "audio/mp3", "wav": "audio/wav"}.get(audio_format, "audio/mp3")
-
-    response = requests.post(
-        RIME_ENDPOINT,
-        headers={
-            "Authorization": f"Bearer {rime_key}",
-            "Accept": accept,
-            "Content-Type": "application/json",
-        },
-        json={
-            "speaker": speaker,
-            "text": text,
-            "modelId": model_id,
-            "speedAlpha": speed_alpha,
-            # Rime's `samplingRate` only applies to WAV/PCM. For MP3 the
-            # encoder picks a sensible default.
-            **({"samplingRate": 22050} if audio_format == "wav" else {}),
-        },
-        timeout=30,
+    """Generate audio from text using Rime TTS. Returns the output path."""
+    audio_bytes = _rime_post(
+        text,
+        audio_format=audio_format,
+        speaker=speaker,
+        model_id=model_id,
+        speed_alpha=speed_alpha,
     )
-    response.raise_for_status()
+    output_path.write_bytes(audio_bytes)
+    return output_path
 
-    # Sanity-check: did we get audio? Rime occasionally returns an error JSON
-    # body with `Content-Type: application/json` even on `Accept: audio/*`.
-    content_type = response.headers.get("Content-Type", "")
-    if "json" in content_type or len(response.content) < 256:
-        raise RuntimeError(
-            f"Rime returned non-audio response (Content-Type={content_type!r}, "
-            f"size={len(response.content)} bytes): {response.text[:200]}"
-        )
 
-    output_path.write_bytes(response.content)
+def synthesize_with_pause(
+    text_part1: str,
+    text_part2: str,
+    output_path: Path,
+    *,
+    silence_ms: int = 800,
+    speaker: str = "abbie",
+    model_id: str = "mistv2",
+    speed_alpha: float = 1.0,
+) -> Path:
+    """Synthesize two text halves and splice GUARANTEED silence between them.
+
+    This is what we use for Failure 01 — Rime's natural pauses on "..." aren't
+    reliable enough to force Deepgram to split the audio into two utterances,
+    so we generate the two halves separately and inject a deterministic
+    silence gap.
+
+    Uses WAV throughout (Rime returns WAV, stdlib `wave` mixes them) — no
+    ffmpeg required. The output WAV is rebuilt by Python's wave module, so
+    its header is canonical and Deepgram parses it without complaint.
+    """
+    sampling_rate = 22050  # Rime's WAV default
+
+    part1 = _rime_post(
+        text_part1,
+        audio_format="wav",
+        speaker=speaker,
+        model_id=model_id,
+        speed_alpha=speed_alpha,
+        sampling_rate=sampling_rate,
+    )
+    part2 = _rime_post(
+        text_part2,
+        audio_format="wav",
+        speaker=speaker,
+        model_id=model_id,
+        speed_alpha=speed_alpha,
+        sampling_rate=sampling_rate,
+    )
+
+    # Read each WAV via stdlib `wave`. This also normalises the headers —
+    # Rime's RIFF chunk is sometimes non-canonical, but `wave` reads the
+    # essentials and our re-write uses a clean header.
+    with wave.open(io.BytesIO(part1), "rb") as w1:
+        params = w1.getparams()
+        frames1 = w1.readframes(w1.getnframes())
+    with wave.open(io.BytesIO(part2), "rb") as w2:
+        frames2 = w2.readframes(w2.getnframes())
+
+    # Generate silence at the same params as part 1.
+    n_silence_samples = int(params.framerate * silence_ms / 1000)
+    silence = b"\x00" * (n_silence_samples * params.sampwidth * params.nchannels)
+
+    with wave.open(str(output_path), "wb") as out:
+        out.setparams(params)
+        out.writeframes(frames1)
+        out.writeframes(silence)
+        out.writeframes(frames2)
+
     return output_path
 
 
 # ── Audio playback ────────────────────────────────────────────────────────────
-# Cross-platform playback by shelling out to a system player. Each platform
-# has at least one installed by default. We deliberately do NOT take a hard
-# dependency on PyAudio / simpleaudio / sounddevice — those need C compilation
-# and portaudio installed at the OS level, which is a big ask for a demo repo.
-
 _MAC_PLAYER = "afplay"
 _LINUX_PLAYERS = ["mpg123", "ffplay", "play", "paplay", "aplay"]
-_WIN_FALLBACK = "cmd.exe"
 
 
 def _find_linux_player() -> list[str] | None:
-    """Return the argv list for a Linux audio player that's actually installed."""
+    """Return argv for a Linux audio player that's installed."""
     for cmd in _LINUX_PLAYERS:
         if shutil.which(cmd):
             if cmd == "ffplay":
@@ -209,15 +254,14 @@ def _find_linux_player() -> list[str] | None:
     return None
 
 
-def play(path: Path, *, label: str | None = None) -> None:
+def play(path: Path, *, label: str | None = None, blocking: bool = True) -> None:
     """Play an audio file through the host's default speakers.
 
-    Honors the PLAY_AUDIO env var — set `PLAY_AUDIO=false` to skip playback
-    (useful in CI). Always prints a status line so the user knows what would
-    have played even if playback is off.
+    `blocking=True` (default) waits for the playback to finish before returning.
+    Honors the PLAY_AUDIO env var — set `PLAY_AUDIO=false` to skip playback.
     """
     if label:
-        console.print(f"  [magenta]🔊 {label}[/magenta]  [dim]({path.name})[/dim]")
+        console.print(f"  [bold magenta]🔊 {label}[/bold magenta]")
 
     if not PLAY_AUDIO:
         console.print("  [dim]   (playback disabled — set PLAY_AUDIO=true to hear it)[/dim]")
@@ -232,8 +276,7 @@ def play(path: Path, *, label: str | None = None) -> None:
         prefix = _find_linux_player()
         argv = [*prefix, str(path)] if prefix else None
     elif system == "Windows":
-        # `start /wait` blocks until the file finishes playing in Windows.
-        argv = [_WIN_FALLBACK, "/c", "start", "/wait", "", str(path)]
+        argv = ["cmd.exe", "/c", "start", "/wait", "", str(path)]
 
     if argv is None:
         console.print(
@@ -243,58 +286,64 @@ def play(path: Path, *, label: str | None = None) -> None:
         return
 
     try:
-        subprocess.run(
-            argv,
-            check=False,
-            stdout=subprocess.DEVNULL,
-            stderr=subprocess.DEVNULL,
-        )
+        if blocking:
+            subprocess.run(
+                argv,
+                check=False,
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+            )
+        else:
+            subprocess.Popen(
+                argv,
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+            )
     except (FileNotFoundError, OSError) as e:
         console.print(f"  [yellow]⚠ Audio playback failed: {e}[/yellow]")
 
 
 # ── Narrative helpers ─────────────────────────────────────────────────────────
-# These exist because a voice talk needs more than tables. The scripts use
-# these to set up each demo with a sentence or two of context, then deliver
-# the punchline after the demo runs.
+# Designed for a projector. Each helper is meant to dominate the visible
+# screen at the moment it's called — the audience should be reading ONE
+# thing at a time, not scanning a wall of text.
 
 
 def header(title: str, subtitle: str = "") -> None:
-    """Open a script with a big banner panel."""
+    """Open a script with a banner panel."""
     body = Text(title, style="bold white")
     if subtitle:
-        body.append("\n" + subtitle, style="dim italic")
+        body.append("\n\n" + subtitle, style="dim italic")
     console.print()
     console.print(Panel(body, border_style="cyan", padding=(1, 4)))
     console.print()
 
 
 def section(title: str) -> None:
-    """Mark a major section in a script."""
+    """Mark a major section."""
     console.print()
-    console.rule(f"[bold cyan]{title}[/bold cyan]", style="cyan")
+    console.rule(f"[bold cyan] {title} [/bold cyan]", style="cyan")
     console.print()
 
 
 def narrate(text: str, *, style: str = "white") -> None:
-    """Print a narrative paragraph — the 'storytelling' between demos."""
+    """One short sentence between demos. Keep it under ~140 characters."""
     console.print(f"  [{style}]{text}[/{style}]")
 
 
-def punchline(text: str, *, kind: str = "fail") -> None:
-    """Land a punchline after a demo. `kind` is 'fail' (red) or 'win' (green)."""
-    if kind == "fail":
-        emoji, color = "❌", "red"
-    elif kind == "win":
-        emoji, color = "✅", "green"
-    else:
-        emoji, color = "💡", "yellow"
+def step(num: int, title: str) -> None:
+    """Mark a numbered step."""
+    console.print(f"\n[bold cyan]Step {num}.[/bold cyan] [bold]{title}[/bold]")
+
+
+def watch_this(text: str) -> None:
+    """A 'watch this' announcement before the demo runs."""
     console.print()
     console.print(
         Panel(
-            Text(text, style=f"bold {color}"),
-            border_style=color,
-            title=f" {emoji} ",
+            Text(text, style="bold yellow", justify="left"),
+            border_style="yellow",
+            title="[bold yellow] 👀  WATCH THIS [/bold yellow]",
             title_align="left",
             padding=(0, 2),
         )
@@ -302,9 +351,65 @@ def punchline(text: str, *, kind: str = "fail") -> None:
     console.print()
 
 
-def step(num: int, title: str) -> None:
-    """Mark a numbered step in a script."""
-    console.print(f"\n[bold cyan]→ Step {num}.[/bold cyan] [bold]{title}[/bold]")
+def verdict(
+    headline: str,
+    detail: str = "",
+    *,
+    kind: str = "fail",
+) -> None:
+    """Big projector-friendly result panel.
+
+    `kind`: 'fail' (red ❌), 'win' (green ✅), 'info' (yellow 💡).
+
+    The headline goes in big bold. The detail is one or two short follow-up
+    lines. Designed to be readable from row 30 of the room.
+    """
+    if kind == "fail":
+        emoji, color, title = "❌", "red", "FAILURE — this is the point of the demo"
+    elif kind == "win":
+        emoji, color, title = "✅", "green", "SUCCESS — the fix worked"
+    else:
+        emoji, color, title = "💡", "yellow", "INCONCLUSIVE — read the detail"
+
+    body = Text(headline, style=f"bold {color}", justify="left")
+    if detail:
+        body.append("\n\n" + detail, style="white")
+
+    console.print()
+    console.print(
+        Panel(
+            body,
+            border_style=color,
+            title=f"[bold {color}] {emoji}  {title} [/bold {color}]",
+            title_align="left",
+            padding=(1, 3),
+        )
+    )
+    console.print()
+
+
+def big_compare(left_label: str, left: str, right_label: str, right: str) -> None:
+    """Two-column compare, projector-readable. Used for naive vs two-tier, etc."""
+    table = Table.grid(padding=(0, 4))
+    table.add_column(justify="center")
+    table.add_column(justify="center")
+    table.add_row(
+        Panel(
+            Text(left, style="bold red", justify="center"),
+            title=f"[bold red] {left_label} [/bold red]",
+            border_style="red",
+            padding=(1, 2),
+        ),
+        Panel(
+            Text(right, style="bold green", justify="center"),
+            title=f"[bold green] {right_label} [/bold green]",
+            border_style="green",
+            padding=(1, 2),
+        ),
+    )
+    console.print()
+    console.print(table)
+    console.print()
 
 
 @contextmanager
@@ -315,7 +420,7 @@ def live_status(message: str) -> Iterator[None]:
 
 
 def pause_for_effect(seconds: float = 0.6) -> None:
-    """Brief silence between sections so the audience can read the previous one."""
+    """Brief silence between sections."""
     time.sleep(seconds)
 
 
@@ -345,7 +450,7 @@ def check_deepgram() -> bool:
 
 
 def check_rime() -> bool:
-    """Verify RIME_API_KEY with a 1-character TTS request (cheapest legal call)."""
+    """Verify RIME_API_KEY with a 1-character TTS request."""
     key = get_key("RIME_API_KEY", required=False)
     if not key:
         console.print("[red]✗ RIME_API_KEY not set[/red]")
@@ -358,11 +463,7 @@ def check_rime() -> bool:
                 "Accept": "audio/mp3",
                 "Content-Type": "application/json",
             },
-            json={
-                "speaker": "abbie",
-                "text": ".",
-                "modelId": "mistv2",
-            },
+            json={"speaker": "abbie", "text": ".", "modelId": "mistv2"},
             timeout=15,
         )
         if r.status_code == 200 and r.content and "json" not in r.headers.get("Content-Type", ""):
@@ -376,7 +477,7 @@ def check_rime() -> bool:
 
 
 def check_nebius() -> bool:
-    """Verify NEBIUS_API_KEY with a 1-token chat completion (cheapest valid call)."""
+    """Verify NEBIUS_API_KEY with a 1-token chat completion."""
     key = get_key("NEBIUS_API_KEY", required=False)
     if not key:
         console.print("[red]✗ NEBIUS_API_KEY not set[/red]")
@@ -398,10 +499,7 @@ def check_nebius() -> bool:
 
 
 def check_all() -> None:
-    """Run all three checks and print a summary table.
-
-    Exits with code 1 if any check fails.
-    """
+    """Run all three checks and print a summary table. Exits 1 on failure."""
     table = Table(show_header=True, header_style="bold cyan")
     table.add_column("Provider", style="white")
     table.add_column("Status", justify="center")
