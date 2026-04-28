@@ -1,15 +1,25 @@
 """Shared utilities for the four failure-mode scripts.
 
-This module is intentionally small. It does three things:
+This module is intentionally small. It does four things:
 
 1. Loads API credentials from `.env`, the environment, or Colab secrets.
 2. Provides a single, friendly Rich console for consistent script output.
-3. Provides cheap "is this credential actually valid?" health checks
-   that the Makefile can call before running any of the four scripts.
+3. Provides a shared `make_llm_client()` factory that returns a Nebius-backed
+   OpenAI client — so all four scripts call the LLM the same way.
+4. Provides cheap "is this credential actually valid?" health checks
+   that the Makefile and `verify_setup.py` can call before running the scripts.
 
 Everything here is pure Python with no I/O at import time. The four
 scripts import from `_utils` rather than each maintaining their own
 copy of the credential-loading boilerplate.
+
+Why Nebius and not OpenAI? Nebius Token Factory is an OpenAI-compatible
+inference platform that hosts open-source models (Llama, Qwen, MiniMax,
+DeepSeek, Gemma) at production-grade latency. Free credits cover the
+entire script series many times over, and the `-fast` model variants
+give us sub-second inference — which matters for the voice-latency
+story this talk is making. The OpenAI SDK is still the client library;
+we just point it at Nebius's base URL.
 """
 
 from __future__ import annotations
@@ -19,6 +29,7 @@ import sys
 from pathlib import Path
 from typing import Final
 
+import openai
 import requests
 from dotenv import load_dotenv
 from rich.console import Console
@@ -33,6 +44,19 @@ ENV_PATH: Final[Path] = REPO_ROOT / ".env"
 # doesn't exist, which is fine — the user might be supplying env vars
 # another way (Colab secrets, CI vars, direnv).
 load_dotenv(ENV_PATH, override=False)
+
+# ── Nebius defaults ───────────────────────────────────────────────────────────
+# Token Factory's OpenAI-compatible inference endpoint.
+NEBIUS_BASE_URL: Final[str] = os.environ.get(
+    "NEBIUS_BASE_URL", "https://api.tokenfactory.nebius.com/v1/"
+)
+
+# Default model — `-fast` variants are sub-second on Nebius and more than
+# enough for the classifier and short-reply work the four scripts do.
+# Override via NEBIUS_MODEL if you want to try Qwen3, MiniMax, DeepSeek, etc.
+DEFAULT_NEBIUS_MODEL: Final[str] = os.environ.get(
+    "NEBIUS_MODEL", "meta-llama/Meta-Llama-3.1-8B-Instruct-fast"
+)
 
 # ── Console ───────────────────────────────────────────────────────────────────
 console: Final[Console] = Console()
@@ -75,9 +99,21 @@ def ensure_audio_dir() -> Path:
     return AUDIO_OUTPUT_DIR
 
 
+# ── LLM client factory ────────────────────────────────────────────────────────
+def make_llm_client() -> openai.OpenAI:
+    """Return an OpenAI SDK client wired up to Nebius Token Factory.
+
+    The OpenAI SDK is the client library; the `base_url` points at Nebius's
+    OpenAI-compatible endpoint. All four scripts use this so we have one
+    place to swap providers, tune timeouts, or add observability.
+    """
+    api_key = get_key("NEBIUS_API_KEY")
+    return openai.OpenAI(api_key=api_key, base_url=NEBIUS_BASE_URL)
+
+
 # ── Health checks ─────────────────────────────────────────────────────────────
 # These are deliberately cheap. Each one makes the smallest possible
-# request that proves the key is valid. We don't synthesize audio or
+# request that proves the key is valid. We don't synthesize real audio or
 # burn LLM tokens — that's what the actual scripts are for.
 
 
@@ -135,24 +171,27 @@ def check_rime() -> bool:
         return False
 
 
-def check_openai() -> bool:
-    """Verify OPENAI_API_KEY by listing models (no token cost)."""
-    key = get_key("OPENAI_API_KEY", required=False)
+def check_nebius() -> bool:
+    """Verify NEBIUS_API_KEY with a 1-token chat completion (cheapest valid call)."""
+    key = get_key("NEBIUS_API_KEY", required=False)
     if not key:
-        console.print("[red]✗ OPENAI_API_KEY not set[/red]")
+        console.print("[red]✗ NEBIUS_API_KEY not set[/red]")
         return False
     try:
-        import openai
-
-        client = openai.OpenAI(api_key=key)
-        # `.list()` is GET /v1/models, returns immediately, no token cost.
-        models = client.models.list()
-        # Just access the first model name to force the iterator.
-        next(iter(models), None)
-        console.print("[green]✓ OpenAI key valid[/green]")
+        client = openai.OpenAI(api_key=key, base_url=NEBIUS_BASE_URL)
+        # Minimal valid chat completion — proves the key + endpoint + model are
+        # all reachable. `max_tokens=1` keeps cost a fraction of a cent.
+        client.chat.completions.create(
+            model=DEFAULT_NEBIUS_MODEL,
+            messages=[{"role": "user", "content": "ping"}],
+            max_tokens=1,
+        )
+        console.print(
+            f"[green]✓ Nebius key valid[/green] [dim](model: {DEFAULT_NEBIUS_MODEL})[/dim]"
+        )
         return True
     except Exception as e:
-        console.print(f"[red]✗ OpenAI check failed: {e}[/red]")
+        console.print(f"[red]✗ Nebius check failed: {e}[/red]")
         return False
 
 
@@ -169,7 +208,7 @@ def check_all() -> None:
     results = {
         "Deepgram": check_deepgram(),
         "Rime": check_rime(),
-        "OpenAI": check_openai(),
+        "Nebius": check_nebius(),
     }
 
     console.print()

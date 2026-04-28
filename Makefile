@@ -45,8 +45,9 @@ help: ## Show this help
 	@echo '${YELLOW}API key checks:${RESET}'
 	@echo '  ${GREEN}make deepgram-check${RESET}     Verify DEEPGRAM_API_KEY works'
 	@echo '  ${GREEN}make rime-check${RESET}         Verify RIME_API_KEY works'
-	@echo '  ${GREEN}make openai-check${RESET}       Verify OPENAI_API_KEY works'
-	@echo '  ${GREEN}make keys-check${RESET}         Verify all three credentials'
+	@echo '  ${GREEN}make nebius-check${RESET}       Verify NEBIUS_API_KEY works'
+	@echo '  ${GREEN}make verify${RESET}             Full pre-flight diagnostics'
+	@echo '  ${GREEN}make keys-check${RESET}         Compact: verify all three credentials'
 	@echo ''
 	@echo '${YELLOW}Quality:${RESET}'
 	@echo '  ${GREEN}make format${RESET}             Auto-format with ruff'
@@ -105,7 +106,7 @@ check-env: ## Verify installation + tools
 	@printf "  deepgram-sdk: "
 	@$(PYTHON) -c "import deepgram; print(deepgram.__version__)" 2>/dev/null \
 	  || echo "${RED}✗ not installed — run: make install${RESET}"
-	@printf "  openai: "
+	@printf "  openai (SDK, used for Nebius): "
 	@$(PYTHON) -c "import openai; print(openai.__version__)" 2>/dev/null \
 	  || echo "${RED}✗ not installed${RESET}"
 	@printf "  requests: "
@@ -125,15 +126,20 @@ rime-check: ## Verify RIME_API_KEY is valid
 	@$(PYTHON) -c "from scripts._utils import check_rime; check_rime()" \
 	  || (echo "${RED}✗ Rime check failed. Set RIME_API_KEY in .env${RESET}" && exit 1)
 
-.PHONY: openai-check
-openai-check: ## Verify OPENAI_API_KEY is valid
-	@$(PYTHON) -c "from scripts._utils import check_openai; check_openai()" \
-	  || (echo "${RED}✗ OpenAI check failed. Set OPENAI_API_KEY in .env${RESET}" && exit 1)
+.PHONY: nebius-check
+nebius-check: ## Verify NEBIUS_API_KEY is valid
+	@$(PYTHON) -c "from scripts._utils import check_nebius; check_nebius()" \
+	  || (echo "${RED}✗ Nebius check failed. Set NEBIUS_API_KEY in .env${RESET}" && exit 1)
 
 .PHONY: keys-check
-keys-check: ## Verify all three API keys
+keys-check: ## Compact: verify all three API keys
 	@echo "${BLUE}→ Checking API credentials${RESET}"
 	@$(PYTHON) -c "from scripts._utils import check_all; check_all()"
+
+.PHONY: verify
+verify: ## Full pre-flight diagnostics (Python, deps, package, services)
+	@echo "${BLUE}→ Running pre-flight diagnostics...${RESET}"
+	@$(PYTHON) scripts/verify_setup.py
 
 # ── Run the scripts ────────────────────────────────────────────────────────────
 .PHONY: script-01

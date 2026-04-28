@@ -4,7 +4,7 @@
 
 Four runnable Python scripts demonstrating the four most common failure modes of production voice agents in 2026 — and the architectural fix for each.
 
-Every script uses **real Deepgram ASR** and **real Rime TTS**. They run end-to-end on your machine in under a minute each.
+Every script uses **real Deepgram ASR**, **real Rime TTS**, and **real Nebius inference**. They run end-to-end on your machine in under a minute each.
 
 ---
 
@@ -38,10 +38,10 @@ make install
 
 # Copy the env template and fill in your API keys
 cp .env.example .env
-# Edit .env with DEEPGRAM_API_KEY, RIME_API_KEY, OPENAI_API_KEY
+# Edit .env with DEEPGRAM_API_KEY, RIME_API_KEY, NEBIUS_API_KEY
 
-# Verify the environment and credentials
-make check-env
+# Run the full pre-flight diagnostic (recommended on first setup)
+make verify
 
 # Run all four scripts in sequence
 make scripts
@@ -62,20 +62,39 @@ Each script runs in 30–60 seconds and costs under a cent in API calls.
 
 ## Prerequisites
 
-You need three API keys. Free tiers cover the entire script series.
+You need three API keys. Free tiers / credits cover the entire script series many times over.
 
 | Provider | What it's used for | Sign up |
 |----------|-------------------|---------|
 | **Deepgram** | Streaming ASR (speech-to-text) | https://deepgram.com |
 | **Rime** | TTS synthesis with controllable pauses | https://rime.ai |
-| **OpenAI** | Small classifiers and the agent loop in scripts 1, 2, 3, 4 | https://platform.openai.com |
+| **Nebius Token Factory** | Small/fast LLM for the classifiers and agent loop | https://nebius.com/services/token-factory |
 
 Set them in a `.env` file at the repo root, or export them as environment variables. The scripts also auto-detect Google Colab Secrets if you'd rather run them in a notebook.
 
 To verify your credentials before running anything:
 
 ```bash
-make keys-check
+make verify
+```
+
+This runs a full pre-flight: Python version, `.env` presence, API-key validity, dependency check, package-layout check, and live round-trips against Deepgram, Rime, and Nebius.
+
+---
+
+## A note on Nebius
+
+Nebius Token Factory is an OpenAI-compatible inference platform that hosts open-source models — Llama, Qwen, MiniMax, DeepSeek, Gemma — at production-grade latency. We use it because:
+
+- The OpenAI Python SDK works unchanged; we just point `base_url` at Nebius
+- The `-fast` model variants give us sub-second inference, which is what voice latency requires
+- Free credits cover the entire script series many times over
+
+The default model is `meta-llama/Meta-Llama-3.1-8B-Instruct-fast`, which is plenty for the small classifier work the scripts do. To try something heavier (e.g. for the agent loop in scripts 3 and 4), set `NEBIUS_MODEL` in your `.env`:
+
+```bash
+# Try a richer model with native tool-calling
+NEBIUS_MODEL=Qwen/Qwen3-30B-A3B-fast
 ```
 
 ---
@@ -111,11 +130,12 @@ The full list (also available via `make help`):
 - `make script-01` … `make script-04` — Run a single failure-mode script
 - `make scripts` — Run all four in sequence (after `keys-check`)
 
-### Credential checks
+### Diagnostics
+- `make verify` — **Full pre-flight check** with section headers, dependency probe, and live round-trips
+- `make keys-check` — Compact summary table of all three credentials
 - `make deepgram-check` — Verify `DEEPGRAM_API_KEY` is valid
 - `make rime-check` — Verify `RIME_API_KEY` is valid
-- `make openai-check` — Verify `OPENAI_API_KEY` is valid
-- `make keys-check` — All three at once, with a summary table
+- `make nebius-check` — Verify `NEBIUS_API_KEY` is valid
 
 ### Quality
 - `make format` — Auto-format with `ruff`
@@ -138,6 +158,7 @@ The full list (also available via `make help`):
 why-voice-ai-agents-fail/
 ├── scripts/
 │   ├── _utils.py                          # Shared helpers (credentials, console, checks)
+│   ├── verify_setup.py                    # Pre-flight diagnostic (`make verify`)
 │   ├── 01_turn_taking.py
 │   ├── 02_backchannels_vs_interrupts.py
 │   ├── 03_split_state.py
@@ -149,6 +170,7 @@ why-voice-ai-agents-fail/
 ├── .gitignore
 ├── Makefile
 ├── pyproject.toml
+├── uv.lock
 └── README.md
 ```
 

@@ -61,5 +61,3 @@ Thumbs.db
 *.log
 .cache/
 _transient-files/
-
-*.tar.gz

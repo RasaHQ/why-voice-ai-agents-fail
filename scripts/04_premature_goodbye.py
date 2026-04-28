@@ -48,23 +48,28 @@ from __future__ import annotations
 from dataclasses import dataclass
 from pathlib import Path
 
-import openai
 import requests
 from rich.panel import Panel
 from rich.table import Table
 
-from scripts._utils import console, ensure_audio_dir, get_key
+from scripts._utils import (
+    DEFAULT_NEBIUS_MODEL,
+    console,
+    ensure_audio_dir,
+    get_key,
+    make_llm_client,
+)
 
 # %% [markdown]
 # ## Setup
 
 # %%
 RIME_API_KEY = get_key("RIME_API_KEY")
-OPENAI_API_KEY = get_key("OPENAI_API_KEY")
+NEBIUS_API_KEY = get_key("NEBIUS_API_KEY")
 AUDIO_DIR = ensure_audio_dir()
 
 console.print(Panel.fit("[bold cyan]Failure 04 — The bot says goodbye too soon[/bold cyan]"))
-openai_client = openai.OpenAI(api_key=OPENAI_API_KEY)
+llm_client = make_llm_client()
 
 # %% [markdown]
 # ## Step 1 — The conversation we'll test
@@ -125,8 +130,8 @@ def run_agent_a(conversation: list[dict[str, str]]) -> str:
         {"role": "system", "content": SYSTEM_PROMPT_AGENT_A},
         *conversation[1:],
     ]
-    response = openai_client.chat.completions.create(
-        model="gpt-4o-mini",
+    response = llm_client.chat.completions.create(
+        model=DEFAULT_NEBIUS_MODEL,
         messages=messages,  # type: ignore[arg-type]
         temperature=0.7,
         max_tokens=80,
@@ -223,8 +228,8 @@ def run_agent_b(
         {"role": "system", "content": SYSTEM_PROMPT_AGENT_A},
         *conversation[1:],
     ]
-    response = openai_client.chat.completions.create(
-        model="gpt-4o-mini",
+    response = llm_client.chat.completions.create(
+        model=DEFAULT_NEBIUS_MODEL,
         messages=messages,  # type: ignore[arg-type]
         temperature=0.7,
         max_tokens=80,
@@ -245,8 +250,8 @@ def run_agent_b(
                 "content": "Do NOT say goodbye. Instead, briefly check if the user has any other questions about their bill. One short sentence.",
             },
         ]
-        wrapup_response = openai_client.chat.completions.create(
-            model="gpt-4o-mini",
+        wrapup_response = llm_client.chat.completions.create(
+            model=DEFAULT_NEBIUS_MODEL,
             messages=wrapup_messages,  # type: ignore[arg-type]
             temperature=0.3,
             max_tokens=40,

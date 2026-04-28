@@ -45,13 +45,18 @@ import time
 from dataclasses import dataclass
 from pathlib import Path
 
-import openai
 import requests
 from deepgram import DeepgramClient, FileSource, PrerecordedOptions
 from rich.panel import Panel
 from rich.table import Table
 
-from scripts._utils import console, ensure_audio_dir, get_key
+from scripts._utils import (
+    DEFAULT_NEBIUS_MODEL,
+    console,
+    ensure_audio_dir,
+    get_key,
+    make_llm_client,
+)
 
 # %% [markdown]
 # ## Step 1 — Load credentials
@@ -59,7 +64,7 @@ from scripts._utils import console, ensure_audio_dir, get_key
 # %%
 DEEPGRAM_API_KEY = get_key("DEEPGRAM_API_KEY")
 RIME_API_KEY = get_key("RIME_API_KEY")
-OPENAI_API_KEY = get_key("OPENAI_API_KEY", required=False)
+NEBIUS_API_KEY = get_key("NEBIUS_API_KEY", required=False)
 AUDIO_DIR = ensure_audio_dir()
 
 console.print(Panel.fit("[bold cyan]Failure 01 — Turn-taking[/bold cyan]"))
@@ -208,17 +213,18 @@ console.print(table)
 #
 # > Is this transcript a *complete thought*, or a fragment with more probably coming?
 #
-# This is a small, fast LLM call. We use OpenAI's `gpt-4o-mini` because it's
-# cheap and fast, but you can swap any small model.
+# This is a small, fast LLM call. We use Nebius's `Meta-Llama-3.1-8B-Instruct-fast`
+# (the default, configurable via NEBIUS_MODEL) because it's cheap and sub-second.
+# Any small model will do — Qwen3, MiniMax, DeepSeek, you name it.
 
 # %%
-if not OPENAI_API_KEY:
+if not NEBIUS_API_KEY:
     console.print(
-        "\n[yellow]⚠ OPENAI_API_KEY not set — skipping the semantic turn-taking demo.[/yellow]"
+        "\n[yellow]⚠ NEBIUS_API_KEY not set — skipping the semantic turn-taking demo.[/yellow]"
     )
     console.print("  Set the key and re-run to see the fix in action.\n")
 else:
-    openai_client = openai.OpenAI(api_key=OPENAI_API_KEY)
+    llm_client = make_llm_client()
 
     SEMANTIC_TURN_PROMPT = """You analyze partial transcripts from a voice agent.
 Your job: decide whether the user has finished their thought or is mid-sentence.
@@ -243,8 +249,8 @@ Output:"""
         Returns (is_complete, latency_seconds).
         """
         t0 = time.time()
-        response = openai_client.chat.completions.create(
-            model="gpt-4o-mini",
+        response = llm_client.chat.completions.create(
+            model=DEFAULT_NEBIUS_MODEL,
             messages=[
                 {
                     "role": "user",

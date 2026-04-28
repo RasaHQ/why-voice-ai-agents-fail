@@ -1,14 +1,14 @@
 [project]
 name = "why-voice-ai-agents-fail"
 version = "0.1.0"
-description = "Companion code for the talk 'Why (Voice) AI Agents Fail' by Rod Rivera (Rasa). Four runnable Python scripts demonstrating production voice-agent failure modes with Deepgram + Rime + OpenAI."
+description = "Companion code for the talk 'Why (Voice) AI Agents Fail' by Rod Rivera (Rasa). Four runnable Python scripts demonstrating production voice-agent failure modes with Deepgram + Rime + Nebius."
 readme = "README.md"
 requires-python = ">=3.11"
 license = { text = "MIT" }
 authors = [
     { name = "Rod Rivera", email = "rod@rasa.com" },
 ]
-keywords = ["voice-ai", "deepgram", "rime", "rasa", "conversational-ai", "asr", "tts", "agents"]
+keywords = ["voice-ai", "deepgram", "rime", "nebius", "rasa", "conversational-ai", "asr", "tts", "agents"]
 classifiers = [
     "Development Status :: 4 - Beta",
     "Intended Audience :: Developers",

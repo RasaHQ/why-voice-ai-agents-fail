@@ -46,19 +46,24 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Literal
 
-import openai
 import requests
 from rich.panel import Panel
 from rich.table import Table
 
-from scripts._utils import console, ensure_audio_dir, get_key
+from scripts._utils import (
+    DEFAULT_NEBIUS_MODEL,
+    console,
+    ensure_audio_dir,
+    get_key,
+    make_llm_client,
+)
 
 # %% [markdown]
 # ## Setup
 
 # %%
 RIME_API_KEY = get_key("RIME_API_KEY")
-OPENAI_API_KEY = get_key("OPENAI_API_KEY")
+NEBIUS_API_KEY = get_key("NEBIUS_API_KEY")
 AUDIO_DIR = ensure_audio_dir()
 
 console.print(Panel.fit("[bold cyan]Failure 02 — Backchannels vs interrupts[/bold cyan]"))
@@ -218,7 +223,7 @@ console.print(tier1_table)
 # context, "yes" looks identical whether it's a backchannel or interrupt.
 
 # %%
-openai_client = openai.OpenAI(api_key=OPENAI_API_KEY)
+llm_client = make_llm_client()
 
 CLASSIFIER_PROMPT = """You classify voice-agent barge-ins.
 
@@ -236,14 +241,14 @@ Output exactly one word: INTERRUPT or BACKCHANNEL"""
 def tier2_semantic(
     bot_context: str,
     user_utterance: str,
-    model: str = "gpt-4o-mini",
+    model: str = DEFAULT_NEBIUS_MODEL,
 ) -> tuple[Literal["INTERRUPT", "BACKCHANNEL"], float]:
     """Tier 2: small LLM with conversational context.
 
     Returns (verdict, latency_seconds).
     """
     t0 = time.time()
-    response = openai_client.chat.completions.create(
+    response = llm_client.chat.completions.create(
         model=model,
         messages=[
             {

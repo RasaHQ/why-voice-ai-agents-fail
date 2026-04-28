@@ -48,19 +48,24 @@ import time
 from dataclasses import dataclass, field
 from pathlib import Path
 
-import openai
 import requests
 from rich.panel import Panel
 from rich.table import Table
 
-from scripts._utils import console, ensure_audio_dir, get_key
+from scripts._utils import (
+    DEFAULT_NEBIUS_MODEL,
+    console,
+    ensure_audio_dir,
+    get_key,
+    make_llm_client,
+)
 
 # %% [markdown]
 # ## Setup
 
 # %%
 RIME_API_KEY = get_key("RIME_API_KEY")
-OPENAI_API_KEY = get_key("OPENAI_API_KEY")
+NEBIUS_API_KEY = get_key("NEBIUS_API_KEY")
 AUDIO_DIR = ensure_audio_dir()
 
 console.print(Panel.fit("[bold cyan]Failure 03 — The system disagrees with itself[/bold cyan]"))
@@ -69,7 +74,7 @@ console.print(Panel.fit("[bold cyan]Failure 03 — The system disagrees with its
 # ## Step 1 — The cancellation primitive
 
 # %%
-openai_client = openai.OpenAI(api_key=OPENAI_API_KEY)
+llm_client = make_llm_client()
 
 
 @dataclass
@@ -149,8 +154,8 @@ async def llm_response(
         token.check()
     events.append(AgentEvent("agent", "llm_call_start", transcript[:30]))
 
-    response = openai_client.chat.completions.create(
-        model="gpt-4o-mini",
+    response = llm_client.chat.completions.create(
+        model=DEFAULT_NEBIUS_MODEL,
         messages=[
             {"role": "system", "content": "Reply in 1 short sentence suitable for speech."},
             {
